@@ -1,0 +1,64 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidNote(data) {
+      return data.userId is string &&
+             data.userId == request.auth.uid &&
+             data.workspaceId is string &&
+             data.workspaceId.size() <= 64 &&
+             data.title is string &&
+             data.title.size() <= 200 &&
+             (!('icon' in data) || (data.icon is string && data.icon.size() <= 32)) &&
+             (!('coverUrl' in data) || (data.coverUrl is string && data.coverUrl.size() <= 2000)) &&
+             (!('isFavorite' in data) || data.isFavorite is bool) &&
+             (!('blocks' in data) || (data.blocks is list && data.blocks.size() <= 500));
+    }
+
+    match /notes/{noteId} {
+      allow get: if isOwner(resource.data.userId);
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() &&
+                      isValidId(noteId) &&
+                      incoming().keys().hasAll(['userId', 'workspaceId', 'title', 'createdAt', 'updatedAt']) &&
+                      incoming().keys().hasOnly(['userId', 'workspaceId', 'title', 'icon', 'coverUrl', 'isFavorite', 'createdAt', 'updatedAt', 'blocks']) &&
+                      isValidNote(incoming()) &&
+                      incoming().createdAt == request.time &&
+                      incoming().updatedAt == request.time;
+      allow update: if isSignedIn() &&
+                      isValidId(noteId) &&
+                      isOwner(existing().userId) &&
+                      incoming().userId == existing().userId &&
+                      incoming().workspaceId == existing().workspaceId &&
+                      incoming().createdAt == existing().createdAt &&
+                      incoming().updatedAt == request.time &&
+                      isValidNote(incoming()) &&
+                      incoming().diff(existing()).affectedKeys().hasOnly(['title', 'icon', 'coverUrl', 'isFavorite', 'updatedAt', 'blocks']);
+      allow delete: if isOwner(resource.data.userId);
+    }
+  }
+}

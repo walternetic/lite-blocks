@@ -1,0 +1,60 @@
+{
+  "entities": {
+    "Note": {
+      "title": "Note",
+      "description": "A multimedia note document containing metadata and structured content blocks",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "UID of the owning user"
+        },
+        "workspaceId": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "ID of the isolated workspace containing this note"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "Title of the note"
+        },
+        "icon": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "Emoji icon string"
+        },
+        "coverUrl": {
+          "type": "string",
+          "maxLength": 2000,
+          "description": "Header cover image URL"
+        },
+        "isFavorite": {
+          "type": "boolean",
+          "description": "Whether the note is pinned in favorites"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update timestamp"
+        },
+        "blocks": {
+          "type": "array",
+          "description": "Array of multimedia modular blocks"
+        }
+      },
+      "required": ["userId", "workspaceId", "title", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/notes/{noteId}": {
+      "schema": "Note",
+      "description": "Collection of user multimedia notes"
+    }
+  }
+}

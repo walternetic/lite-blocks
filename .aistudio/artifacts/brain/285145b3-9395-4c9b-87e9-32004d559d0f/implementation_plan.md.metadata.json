@@ -1,0 +1,6 @@
+{
+  "summary": "Stima accurata della memoria del browser per un sito tipico (20 pagine x 30 blocchi) e piano di implementazione della metrica combinata di memoria (peso dati workspace in RAM e heap JS del browser) con finestra di diagnostica dettagliata apribile con un clic.",
+  "updatedAt": "2026-10-14T12:05:52.379269418Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

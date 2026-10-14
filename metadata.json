@@ -1,0 +1,6 @@
+{
+  "name": "Notion Lite",
+  "description": "Spazio di lavoro per note multimediali con blocchi interattivi, immagini, to-do, codice, allegati e sincronizzazione cloud.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
