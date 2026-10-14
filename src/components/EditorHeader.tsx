@@ -78,18 +78,29 @@ export const EditorHeader: React.FC<EditorHeaderProps> = ({
   return (
     <div className="relative w-full">
       {/* Top sticky action bar */}
-      <div className="sticky top-0 z-20 flex items-center justify-between px-6 py-2.5 bg-white/80 dark:bg-neutral-900/80 backdrop-blur-md border-b border-neutral-100 dark:border-neutral-800">
+      <div
+        style={{
+          backgroundColor: 'var(--theme-bg-surface)',
+          borderBottomColor: 'var(--theme-border)',
+          color: 'var(--theme-text-main)',
+        }}
+        className="sticky top-0 z-20 flex items-center justify-between px-6 py-2.5 border-b backdrop-blur-md"
+      >
         <div className="flex items-center gap-3">
           <button
             onClick={onToggleSidebar}
-            className="p-1.5 rounded-lg text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
+            style={{ color: 'var(--theme-text-muted)' }}
+            className="p-1.5 rounded-lg hover:text-[var(--theme-text-main)] hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
             title={isSidebarOpen ? 'Nascondi barra laterale' : 'Mostra barra laterale'}
           >
             <Menu className="w-4 h-4" />
           </button>
 
           {/* Sync status indicator */}
-          <div className="flex items-center gap-1.5 text-xs text-neutral-500 dark:text-neutral-400">
+          <div
+            style={{ color: 'var(--theme-text-muted)' }}
+            className="flex items-center gap-1.5 text-xs"
+          >
             {syncStatus === 'saving' ? (
               <>
                 <CloudUpload className="w-3.5 h-3.5 text-amber-500 animate-pulse" />
@@ -113,10 +124,9 @@ export const EditorHeader: React.FC<EditorHeaderProps> = ({
         <div className="flex items-center gap-1">
           <button
             onClick={() => onUpdateNote({ isFavorite: !note.isFavorite })}
-            className={`p-1.5 rounded-lg transition-colors ${
-              note.isFavorite
-                ? 'text-amber-500 hover:bg-amber-50 dark:hover:bg-amber-950/30'
-                : 'text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800'
+            style={note.isFavorite ? { color: '#f59e0b' } : { color: 'var(--theme-text-muted)' }}
+            className={`p-1.5 rounded-lg transition-colors hover:text-[var(--theme-text-main)] hover:bg-black/5 dark:hover:bg-white/5 ${
+              note.isFavorite ? 'hover:bg-amber-50 dark:hover:bg-amber-950/30' : ''
             }`}
             title={note.isFavorite ? 'Rimuovi dai preferiti' : 'Aggiungi ai preferiti'}
           >
@@ -125,7 +135,8 @@ export const EditorHeader: React.FC<EditorHeaderProps> = ({
 
           <button
             onClick={handleExportMarkdown}
-            className="p-1.5 rounded-lg text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
+            style={{ color: 'var(--theme-text-muted)' }}
+            className="p-1.5 rounded-lg hover:text-[var(--theme-text-main)] hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
             title="Esporta nota (.md)"
           >
             <Download className="w-4 h-4" />
@@ -193,11 +204,14 @@ export const EditorHeader: React.FC<EditorHeaderProps> = ({
       {/* Page header title & icon area */}
       <div className="max-w-3xl mx-auto px-12 pt-4 pb-2">
         {/* Quick Add buttons (Cover, Icon) when not set */}
-        <div className="flex items-center gap-3 text-xs text-neutral-400 dark:text-neutral-500 mb-2">
+        <div
+          style={{ color: 'var(--theme-text-muted)' }}
+          className="flex items-center gap-3 text-xs mb-2"
+        >
           {!note.icon && (
             <button
               onClick={() => setShowEmojiPicker(true)}
-              className="flex items-center gap-1 hover:text-neutral-700 dark:hover:text-neutral-300"
+              className="flex items-center gap-1 hover:text-[var(--theme-text-main)] transition-colors"
             >
               <Smile className="w-3.5 h-3.5" /> Aggiungi icona
             </button>
@@ -205,7 +219,7 @@ export const EditorHeader: React.FC<EditorHeaderProps> = ({
           {!note.coverUrl && (
             <button
               onClick={() => setShowCoverPicker(true)}
-              className="flex items-center gap-1 hover:text-neutral-700 dark:hover:text-neutral-300"
+              className="flex items-center gap-1 hover:text-[var(--theme-text-main)] transition-colors"
             >
               <ImageIcon className="w-3.5 h-3.5" /> Aggiungi copertina
             </button>
@@ -250,11 +264,15 @@ export const EditorHeader: React.FC<EditorHeaderProps> = ({
             }
           }}
           placeholder="Senza titolo"
-          className="w-full font-display text-4xl font-extrabold tracking-tight text-neutral-900 dark:text-white bg-transparent border-none outline-none placeholder:text-neutral-300 dark:placeholder:text-neutral-600 resize-none overflow-hidden block p-0 m-0 leading-tight"
+          style={{ color: 'var(--theme-text-main)' }}
+          className="w-full font-display text-4xl font-extrabold tracking-tight bg-transparent border-none outline-none resize-none overflow-hidden block p-0 m-0 leading-tight"
         />
 
         {/* Metadata info */}
-        <div className="flex items-center gap-2 mt-2 text-xs text-neutral-400 dark:text-neutral-500 font-mono">
+        <div
+          style={{ color: 'var(--theme-text-muted)' }}
+          className="flex items-center gap-2 mt-2 text-xs font-mono"
+        >
           <span>
             Ultima modifica{' '}
             {new Date(note.updatedAt).toLocaleTimeString('it-IT', {

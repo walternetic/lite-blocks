@@ -41,6 +41,7 @@ export interface WorkspaceMeta {
   id: string;
   name: string;
   icon: string;
+  themeId?: string;
   createdAt: number;
   updatedAt: number;
 }

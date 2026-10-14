@@ -20,8 +20,8 @@ interface WorkspaceSelectorProps {
   workspaceStatusMap?: Record<string, WorkspaceStatus>;
   loadedWorkspaces?: Record<string, { notes: Note[]; status: WorkspaceStatus }>;
   onSelectWorkspaceInPlace: (workspaceId: string) => void;
-  onCreateWorkspace: (name: string, icon: string) => void;
-  onUpdateWorkspace: (workspaceId: string, name: string, icon: string) => void;
+  onCreateWorkspace: (name: string, icon: string, themeId?: string) => void;
+  onUpdateWorkspace: (workspaceId: string, name: string, icon: string, themeId?: string) => void;
   onDeleteWorkspace: (workspaceId: string) => void;
   onUnloadWorkspace: (workspaceId?: string) => void;
 }
@@ -152,7 +152,12 @@ export const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({
             setIsOpen(!isOpen);
           }
         }}
-        className="cursor-pointer w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg border border-[#ececeb] dark:border-[#2e2e2e] bg-white dark:bg-[#202020] hover:bg-neutral-100/90 dark:hover:bg-[#282828] hover:border-neutral-300 dark:hover:border-neutral-600 transition-all shadow-2xs group select-none min-h-[34px]"
+        style={{
+          backgroundColor: 'var(--theme-bg-surface)',
+          borderColor: 'var(--theme-border)',
+          color: 'var(--theme-text-main)',
+        }}
+        className="cursor-pointer w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg border hover:opacity-95 transition-all shadow-2xs group select-none min-h-[34px]"
         title="Clicca per aprire la lista dei workspace"
       >
         {/* Workspace Identity: Single-line compact layout with generous full-card hitbox */}
@@ -160,7 +165,10 @@ export const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({
           <span className="text-base shrink-0 leading-none select-none">
             {activeWorkspace?.icon || '📁'}
           </span>
-          <span className="font-display font-semibold text-xs text-neutral-900 dark:text-neutral-100 group-hover:text-black dark:group-hover:text-white truncate">
+          <span
+            style={{ color: 'var(--theme-text-main)' }}
+            className="font-display font-semibold text-xs truncate"
+          >
             {activeWorkspace?.name || 'Workspace'}
           </span>
         </div>
@@ -212,7 +220,8 @@ export const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({
               e.stopPropagation();
               setIsOpen(!isOpen);
             }}
-            className="p-1 rounded-md text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-200/50 dark:hover:bg-neutral-700/50 transition-colors"
+            style={{ color: 'var(--theme-text-muted)' }}
+            className="p-1 rounded-md hover:text-[var(--theme-text-main)] hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
             title={isOpen ? 'Chiudi lista workspace' : 'Apri lista workspace'}
           >
             <ChevronDown
@@ -226,9 +235,19 @@ export const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({
 
       {/* Workspace Menu Popover */}
       {isOpen && (
-        <div className="absolute left-0 right-0 top-full mt-1.5 z-50 bg-white dark:bg-[#202020] border border-[#ececeb] dark:border-[#2e2e2e] rounded-xl shadow-xl p-2 animate-in fade-in zoom-in-95 duration-100 text-xs">
+        <div
+          style={{
+            backgroundColor: 'var(--theme-bg-surface)',
+            borderColor: 'var(--theme-border)',
+            color: 'var(--theme-text-main)',
+          }}
+          className="absolute left-0 right-0 top-full mt-1.5 z-50 border rounded-xl shadow-xl p-2 animate-in fade-in zoom-in-95 duration-100 text-xs"
+        >
           {/* Header info */}
-          <div className="px-2 py-1 text-[11px] text-neutral-500 dark:text-neutral-400 flex items-center justify-between border-b border-[#ececeb] dark:border-[#2e2e2e] pb-1.5 mb-1.5">
+          <div
+            style={{ borderColor: 'var(--theme-border)', color: 'var(--theme-text-muted)' }}
+            className="px-2 py-1 text-[11px] flex items-center justify-between border-b pb-1.5 mb-1.5"
+          >
             <span className="font-medium">I tuoi Workspace ({workspaces.length})</span>
             <span className="font-mono text-[10px] text-emerald-600 dark:text-emerald-400 font-medium">
               {activeWorkspacesCount} in RAM
@@ -248,7 +267,11 @@ export const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({
                 return (
                   <div
                     key={ws.id}
-                    className="p-1.5 bg-neutral-100 dark:bg-neutral-800 rounded-lg space-y-1.5 text-xs"
+                    style={{
+                      backgroundColor: 'var(--theme-bg-hover)',
+                      borderColor: 'var(--theme-border)',
+                    }}
+                    className="p-1.5 rounded-lg border space-y-1.5 text-xs"
                   >
                     <div className="flex gap-1.5">
                       <input
@@ -256,25 +279,40 @@ export const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({
                         value={newIcon}
                         onChange={(e) => setNewIcon(e.target.value)}
                         maxLength={4}
-                        className="w-8 px-1 text-center bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded text-xs text-neutral-900 dark:text-neutral-100"
+                        style={{
+                          backgroundColor: 'var(--theme-bg-surface)',
+                          borderColor: 'var(--theme-border)',
+                          color: 'var(--theme-text-main)',
+                        }}
+                        className="w-8 px-1 text-center border rounded text-xs"
                       />
                       <input
                         type="text"
                         value={newName}
                         onChange={(e) => setNewName(e.target.value)}
-                        className="flex-1 px-2 py-1 bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded text-xs text-neutral-900 dark:text-neutral-100"
+                        style={{
+                          backgroundColor: 'var(--theme-bg-surface)',
+                          borderColor: 'var(--theme-border)',
+                          color: 'var(--theme-text-main)',
+                        }}
+                        className="flex-1 px-2 py-1 border rounded text-xs"
                       />
                     </div>
                     <div className="flex justify-end gap-1">
                       <button
                         onClick={() => setEditingWsId(null)}
-                        className="px-2 py-0.5 rounded text-neutral-500 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-[11px]"
+                        style={{ color: 'var(--theme-text-muted)' }}
+                        className="px-2 py-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10 text-[11px]"
                       >
                         Annulla
                       </button>
                       <button
                         onClick={() => handleSaveEdit(ws.id)}
-                        className="px-2 py-0.5 rounded bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 text-[11px] font-medium"
+                        style={{
+                          backgroundColor: 'var(--theme-accent)',
+                          color: 'var(--theme-accent-text)',
+                        }}
+                        className="px-2 py-0.5 rounded text-[11px] font-medium"
                       >
                         Salva
                       </button>
@@ -286,21 +324,28 @@ export const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({
               return (
                 <div
                   key={ws.id}
-                  className={`group/item flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition-colors ${
+                  style={
                     isSelected
-                      ? 'bg-neutral-200/90 dark:bg-neutral-700 font-semibold text-neutral-950 dark:text-white'
-                      : 'text-neutral-700 dark:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-700/80 hover:text-neutral-950 dark:hover:text-white'
-                  }`}
+                      ? {
+                          backgroundColor: 'var(--theme-bg-hover)',
+                          color: 'var(--theme-text-main)',
+                        }
+                      : {
+                          color: 'var(--theme-text-muted)',
+                        }
+                  }
+                  className="group/item flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition-colors hover:text-[var(--theme-text-main)]"
                 >
                   {/* Default click loads in-line; Shift+Click opens new tab */}
                   <button
                     type="button"
                     onClick={(e) => handleWorkspaceItemClick(e, ws.id)}
-                    className="flex items-center gap-2 min-w-0 flex-1 text-left text-neutral-900 dark:text-neutral-100 group-hover/item:text-neutral-950 dark:group-hover/item:text-white py-0.5"
+                    className="flex items-center gap-2 min-w-0 flex-1 text-left py-0.5 font-medium"
+                    style={{ color: 'inherit' }}
                     title="Clic: carica in questo tab · Shift+Clic: apri in nuova scheda"
                   >
                     <span className="text-base leading-none shrink-0">{ws.icon}</span>
-                    <span className="truncate font-medium">{ws.name}</span>
+                    <span className="truncate">{ws.name}</span>
                   </button>
 
                   <div className="flex items-center gap-1 shrink-0 ml-1.5">
@@ -346,7 +391,8 @@ export const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({
                       target="_blank"
                       rel="noopener noreferrer"
                       onClick={(e) => e.stopPropagation()}
-                      className="p-1 text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-100 hover:bg-neutral-200/70 dark:hover:bg-neutral-600 rounded transition-colors"
+                      style={{ color: 'var(--theme-text-muted)' }}
+                      className="p-1 hover:text-[var(--theme-text-main)] hover:bg-black/5 dark:hover:bg-white/5 rounded transition-colors"
                       title="Apri workspace in una nuova scheda"
                     >
                       <ExternalLink className="w-3 h-3" />
@@ -358,7 +404,8 @@ export const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({
                         e.stopPropagation();
                         handleStartEdit(ws);
                       }}
-                      className="p-1 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 opacity-0 group-hover/item:opacity-100 rounded transition-opacity"
+                      style={{ color: 'var(--theme-text-muted)' }}
+                      className="p-1 hover:text-[var(--theme-text-main)] opacity-0 group-hover/item:opacity-100 rounded transition-opacity"
                       title="Modifica nome e icona"
                     >
                       <Edit2 className="w-3 h-3" />
@@ -390,9 +437,18 @@ export const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({
           </div>
 
           {/* Create Workspace Inline Form or Trigger */}
-          <div className="pt-1 mt-1 border-t border-[#ececeb] dark:border-[#2e2e2e]">
+          <div
+            style={{ borderColor: 'var(--theme-border)' }}
+            className="pt-1 mt-1 border-t"
+          >
             {isCreating ? (
-              <div className="p-1.5 bg-neutral-100 dark:bg-neutral-800 rounded-lg space-y-1.5 text-xs">
+              <div
+                style={{
+                  backgroundColor: 'var(--theme-bg-hover)',
+                  borderColor: 'var(--theme-border)',
+                }}
+                className="p-1.5 rounded-lg border space-y-1.5 text-xs"
+              >
                 <div className="flex gap-1.5">
                   <input
                     type="text"
@@ -400,28 +456,43 @@ export const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({
                     onChange={(e) => setNewIcon(e.target.value)}
                     maxLength={4}
                     placeholder="📁"
-                    className="w-8 px-1 text-center bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded text-xs text-neutral-900 dark:text-neutral-100"
+                    style={{
+                      backgroundColor: 'var(--theme-bg-surface)',
+                      borderColor: 'var(--theme-border)',
+                      color: 'var(--theme-text-main)',
+                    }}
+                    className="w-8 px-1 text-center border rounded text-xs"
                   />
                   <input
                     type="text"
                     value={newName}
                     onChange={(e) => setNewName(e.target.value)}
                     placeholder="Nome workspace..."
-                    className="flex-1 px-2 py-1 bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded text-xs text-neutral-900 dark:text-neutral-100"
+                    style={{
+                      backgroundColor: 'var(--theme-bg-surface)',
+                      borderColor: 'var(--theme-border)',
+                      color: 'var(--theme-text-main)',
+                    }}
+                    className="flex-1 px-2 py-1 border rounded text-xs"
                     autoFocus
                   />
                 </div>
                 <div className="flex justify-end gap-1">
                   <button
                     onClick={() => setIsCreating(false)}
-                    className="px-2 py-0.5 rounded text-neutral-500 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-[11px]"
+                    style={{ color: 'var(--theme-text-muted)' }}
+                    className="px-2 py-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10 text-[11px]"
                   >
                     Annulla
                   </button>
                   <button
                     onClick={handleSaveCreate}
                     disabled={!newName.trim()}
-                    className="px-2 py-0.5 rounded bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 text-[11px] font-semibold disabled:opacity-40"
+                    style={{
+                      backgroundColor: 'var(--theme-accent)',
+                      color: 'var(--theme-accent-text)',
+                    }}
+                    className="px-2 py-0.5 rounded text-[11px] font-semibold disabled:opacity-40"
                   >
                     Crea
                   </button>
@@ -430,9 +501,10 @@ export const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({
             ) : (
               <button
                 onClick={handleStartCreate}
-                className="w-full flex items-center gap-1.5 px-2 py-1 text-xs text-neutral-700 dark:text-neutral-300 hover:text-neutral-950 dark:hover:text-white hover:bg-neutral-100 dark:hover:bg-neutral-700/80 rounded-lg transition-colors font-medium"
+                style={{ color: 'var(--theme-text-muted)' }}
+                className="w-full flex items-center gap-1.5 px-2 py-1 text-xs hover:text-[var(--theme-text-main)] hover:bg-black/5 dark:hover:bg-white/5 rounded-lg transition-colors font-medium"
               >
-                <Plus className="w-3.5 h-3.5 text-neutral-500" />
+                <Plus className="w-3.5 h-3.5" />
                 <span>Nuovo workspace</span>
               </button>
             )}

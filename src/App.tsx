@@ -25,6 +25,11 @@ import {
   generateUuid,
 } from './lib/urlRouting';
 import {
+  getThemeById,
+  getThemeCssVariables,
+  DEFAULT_THEME_ID,
+} from './lib/themes';
+import {
   auth,
   db,
   loginWithGoogle,
@@ -45,11 +50,17 @@ import {
 import { User } from 'firebase/auth';
 import { Plus, FileText, Database, Power, Globe } from 'lucide-react';
 
+interface FocusTarget {
+  id: string;
+  cursorPosition?: 'start' | 'end' | number;
+}
+
 const ACTIVE_WS_KEY = 'liteblocks_active_ws_id_v1';
 const THEME_KEY = 'liteblocks_theme_v1';
 
 export default function App() {
   const sidebarRef = useRef<SidebarHandle>(null);
+  const [focusedBlockTarget, setFocusedBlockTarget] = useState<FocusTarget | null>(null);
 
   // Workspaces Manifest (ultra-lightweight metadata list)
   const [workspaces, setWorkspaces] = useState<WorkspaceMeta[]>(() => {
@@ -152,16 +163,28 @@ export default function App() {
     scrollY: number;
   } | null>(null);
 
-  // Apply dark mode class to html element
+  const activeWsMeta = workspaces.find((w) => w.id === activeWorkspaceId);
+  const currentTheme = getThemeById(activeWsMeta?.themeId || (isDarkMode ? 'tokyo-night' : DEFAULT_THEME_ID));
+
+  // Apply active theme variables and dark mode class to html element
   useEffect(() => {
-    if (isDarkMode) {
+    const isDark = currentTheme.mode === 'dark';
+    if (isDark) {
       document.documentElement.classList.add('dark');
+      setIsDarkMode(true);
       localStorage.setItem(THEME_KEY, 'dark');
     } else {
       document.documentElement.classList.remove('dark');
+      setIsDarkMode(false);
       localStorage.setItem(THEME_KEY, 'light');
     }
-  }, [isDarkMode]);
+
+    const root = document.documentElement;
+    const cssVars = getThemeCssVariables(currentTheme);
+    Object.entries(cssVars).forEach(([key, val]) => {
+      root.style.setProperty(key, val);
+    });
+  }, [currentTheme]);
 
   // Persist notes strictly to active workspace storage partition and sync with RAM cache
   useEffect(() => {
@@ -490,7 +513,12 @@ export default function App() {
 
   const handleDeleteBlock = (blockId: string) => {
     if (!activeNote) return;
+    const index = activeNote.blocks.findIndex((b) => b.id === blockId);
     const newBlocks = activeNote.blocks.filter((b) => b.id !== blockId);
+    if (newBlocks.length > 0) {
+      const prevIndex = Math.max(0, index - 1);
+      setFocusedBlockTarget({ id: newBlocks[prevIndex].id, cursorPosition: 'end' });
+    }
     handleUpdateNote({
       blocks:
         newBlocks.length === 0
@@ -499,16 +527,98 @@ export default function App() {
     });
   };
 
-  const handleInsertBlockBelow = (type: BlockType, afterIndex: number) => {
+  const handleInsertBlockBelow = (
+    type: BlockType,
+    afterIndex: number,
+    currentBlockContent?: string,
+    newBlockContent: string = '',
+    blockData?: Partial<NoteBlock>
+  ) => {
     if (!activeNote) return;
+    const newBlockId = 'b-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4);
+    const { id: _ignoredId, ...restBlockData } = blockData || {};
     const newBlock: NoteBlock = {
-      id: 'b-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
       type,
-      content: '',
+      content: newBlockContent,
       completed: type === 'todo' ? false : undefined,
+      ...restBlockData,
+      id: newBlockId,
     };
     const newBlocks = [...activeNote.blocks];
+    if (currentBlockContent !== undefined && newBlocks[afterIndex]) {
+      newBlocks[afterIndex] = {
+        ...newBlocks[afterIndex],
+        content: currentBlockContent,
+      };
+    }
     newBlocks.splice(afterIndex + 1, 0, newBlock);
+    setFocusedBlockTarget({ id: newBlockId, cursorPosition: 'start' });
+    handleUpdateNote({ blocks: newBlocks });
+  };
+
+  const handleMergeWithPrevious = (currentIndex: number) => {
+    if (!activeNote || currentIndex <= 0) return;
+    const prevBlock = activeNote.blocks[currentIndex - 1];
+    const currentBlock = activeNote.blocks[currentIndex];
+    if (!prevBlock || !currentBlock) return;
+
+    const isTextBlock = (b: NoteBlock) => b.type !== 'image' && b.type !== 'file';
+
+    if (!isTextBlock(prevBlock) || !isTextBlock(currentBlock)) {
+      if (currentBlock.content === '') {
+        handleDeleteBlock(currentBlock.id);
+      }
+      return;
+    }
+
+    const cursorPosition = (prevBlock.content || '').length;
+    const mergedContent = (prevBlock.content || '') + (currentBlock.content || '');
+
+    const newBlocks = [...activeNote.blocks];
+    newBlocks[currentIndex - 1] = {
+      ...prevBlock,
+      content: mergedContent,
+    };
+    newBlocks.splice(currentIndex, 1);
+
+    setFocusedBlockTarget({
+      id: prevBlock.id,
+      cursorPosition,
+    });
+
+    handleUpdateNote({ blocks: newBlocks });
+  };
+
+  const handleMergeWithNext = (currentIndex: number) => {
+    if (!activeNote || currentIndex >= activeNote.blocks.length - 1) return;
+    const currentBlock = activeNote.blocks[currentIndex];
+    const nextBlock = activeNote.blocks[currentIndex + 1];
+    if (!currentBlock || !nextBlock) return;
+
+    const isTextBlock = (b: NoteBlock) => b.type !== 'image' && b.type !== 'file';
+
+    if (!isTextBlock(currentBlock) || !isTextBlock(nextBlock)) {
+      if (nextBlock.content === '') {
+        handleDeleteBlock(nextBlock.id);
+      }
+      return;
+    }
+
+    const cursorPosition = (currentBlock.content || '').length;
+    const mergedContent = (currentBlock.content || '') + (nextBlock.content || '');
+
+    const newBlocks = [...activeNote.blocks];
+    newBlocks[currentIndex] = {
+      ...currentBlock,
+      content: mergedContent,
+    };
+    newBlocks.splice(currentIndex + 1, 1);
+
+    setFocusedBlockTarget({
+      id: currentBlock.id,
+      cursorPosition,
+    });
+
     handleUpdateNote({ blocks: newBlocks });
   };
 
@@ -741,11 +851,12 @@ export default function App() {
   };
 
   // Create new workspace
-  const handleCreateWorkspace = (name: string, icon: string) => {
+  const handleCreateWorkspace = (name: string, icon: string, themeId?: string) => {
     const newWs: WorkspaceMeta = {
       id: 'ws-' + Date.now(),
       name,
       icon,
+      themeId: themeId || DEFAULT_THEME_ID,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -789,9 +900,17 @@ export default function App() {
   };
 
   // Update workspace meta
-  const handleUpdateWorkspace = (wsId: string, name: string, icon: string) => {
+  const handleUpdateWorkspace = (wsId: string, name: string, icon: string, themeId?: string) => {
     const updated = workspaces.map((w) =>
-      w.id === wsId ? { ...w, name, icon, updatedAt: Date.now() } : w
+      w.id === wsId
+        ? {
+            ...w,
+            name,
+            icon,
+            themeId: themeId || w.themeId || DEFAULT_THEME_ID,
+            updatedAt: Date.now(),
+          }
+        : w
     );
     setWorkspaces(updated);
     saveWorkspacesManifest(updated);
@@ -867,10 +986,28 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
   }, [notes, workspaceStatus, isSidebarOpen]);
 
-  const activeWsMeta = workspaces.find((w) => w.id === activeWorkspaceId);
+  const handleApplyTheme = (themeId: string) => {
+    handleUpdateWorkspace(
+      activeWorkspaceId,
+      activeWsMeta?.name || 'Workspace',
+      activeWsMeta?.icon || '📁',
+      themeId
+    );
+  };
+
+  const handleToggleDarkMode = () => {
+    const targetThemeId = currentTheme.mode === 'dark' ? 'notion-minimal' : 'tokyo-night';
+    handleApplyTheme(targetThemeId);
+  };
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-white dark:bg-[#191919] text-neutral-900 dark:text-neutral-100 selection:bg-neutral-200 dark:selection:bg-neutral-700">
+    <div
+      style={{
+        backgroundColor: 'var(--theme-bg-app)',
+        color: 'var(--theme-text-main)',
+      }}
+      className="flex h-screen w-screen overflow-hidden selection:bg-neutral-200 dark:selection:bg-neutral-700"
+    >
       {/* Sidebar Navigation */}
       <Sidebar
         ref={sidebarRef}
@@ -879,8 +1016,8 @@ export default function App() {
         onSelectNote={handleSelectNote}
         onDeleteNote={handleDeleteNote}
         onToggleFavorite={handleToggleFavorite}
-        isDarkMode={isDarkMode}
-        onToggleDarkMode={() => setIsDarkMode(!isDarkMode)}
+        isDarkMode={currentTheme.mode === 'dark'}
+        onToggleDarkMode={handleToggleDarkMode}
         isOpen={isSidebarOpen}
         onCloseSidebar={() => setIsSidebarOpen(false)}
         currentUser={currentUser}
@@ -894,6 +1031,7 @@ export default function App() {
         onSelectWorkspaceInPlace={handleSelectWorkspaceInPlace}
         onCreateWorkspace={handleCreateWorkspace}
         onUpdateWorkspace={handleUpdateWorkspace}
+        onApplyTheme={handleApplyTheme}
         onDeleteWorkspace={handleDeleteWorkspace}
         onUnloadWorkspace={handleUnloadWorkspace}
         onOpenGlobalSearch={(q) => {
@@ -904,7 +1042,13 @@ export default function App() {
       />
 
       {/* Main Content Area */}
-      <main className="flex-1 h-full overflow-y-auto flex flex-col relative">
+      <main
+        style={{
+          backgroundColor: 'var(--theme-bg-app)',
+          color: 'var(--theme-text-main)',
+        }}
+        className="flex-1 h-full overflow-y-auto flex flex-col relative"
+      >
         {workspaceStatus === 'unloaded' ? (
           // Unloaded Workspace Standby Screen (Zero Memory Footprint)
           <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-neutral-400">
@@ -947,9 +1091,18 @@ export default function App() {
                   block={block}
                   index={idx}
                   totalBlocks={activeNote.blocks.length}
+                  autoFocus={focusedBlockTarget?.id === block.id}
+                  focusPosition={
+                    focusedBlockTarget?.id === block.id
+                      ? focusedBlockTarget.cursorPosition
+                      : undefined
+                  }
+                  onFocusHandled={() => setFocusedBlockTarget(null)}
                   onUpdate={handleUpdateBlock}
                   onDelete={handleDeleteBlock}
                   onInsertBelow={handleInsertBlockBelow}
+                  onMergeWithPrevious={handleMergeWithPrevious}
+                  onMergeWithNext={handleMergeWithNext}
                   onMoveUp={handleMoveBlockUp}
                   onMoveDown={handleMoveBlockDown}
                   onDuplicate={handleDuplicateBlock}

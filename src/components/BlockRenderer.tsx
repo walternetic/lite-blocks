@@ -1,7 +1,17 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { NoteBlock, BlockType } from '../types/note';
 import { SlashCommandMenu } from './SlashCommandMenu';
-import { resolveCrossWorkspaceLink } from '../lib/workspaceStorage';
+import { InlineRichEditor } from './InlineRichEditor';
+import { PageLinkModal } from './PageLinkModal';
+import {
+  handleBlockCopy,
+  parseClipboardPaste,
+  isShiftPasteActive,
+  buildMultiMimeClipboard,
+  useLocalClipboard,
+  getLocalClipboard,
+  setLocalClipboard,
+} from '../lib/clipboard';
 import {
   Plus,
   GripVertical,
@@ -17,15 +27,28 @@ import {
   Maximize2,
   MoreHorizontal,
   ChevronDown,
+  ChevronRight,
+  ClipboardPaste,
 } from 'lucide-react';
 
 interface BlockRendererProps {
   block: NoteBlock;
   index: number;
   totalBlocks: number;
+  autoFocus?: boolean;
+  focusPosition?: 'start' | 'end' | number;
+  onFocusHandled?: () => void;
   onUpdate: (updatedBlock: NoteBlock) => void;
   onDelete: (blockId: string) => void;
-  onInsertBelow: (type: BlockType, afterIndex: number) => void;
+  onInsertBelow: (
+    type: BlockType,
+    afterIndex: number,
+    currentBlockContent?: string,
+    newBlockContent?: string,
+    blockData?: Partial<NoteBlock>
+  ) => void;
+  onMergeWithPrevious: (index: number) => void;
+  onMergeWithNext: (index: number) => void;
   onMoveUp: (index: number) => void;
   onMoveDown: (index: number) => void;
   onDuplicate: (index: number) => void;
@@ -50,9 +73,14 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
   block,
   index,
   totalBlocks,
+  autoFocus,
+  focusPosition,
+  onFocusHandled,
   onUpdate,
   onDelete,
   onInsertBelow,
+  onMergeWithPrevious,
+  onMergeWithNext,
   onMoveUp,
   onMoveDown,
   onDuplicate,
@@ -64,16 +92,71 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [showOptionsMenu, setShowOptionsMenu] = useState(false);
   const [showSubMenu, setShowSubMenu] = useState(false);
+  const { hasContent: hasLocalClipboardContent } = useLocalClipboard();
   const [slashQuery, setSlashQuery] = useState('');
   const [copiedCode, setCopiedCode] = useState(false);
   const [customImageUrl, setCustomImageUrl] = useState('');
   const [showUrlInput, setShowUrlInput] = useState(false);
   const [dropIndicator, setDropIndicator] = useState<'top' | 'bottom' | null>(null);
   const [isBeingDragged, setIsBeingDragged] = useState(false);
+  const [linkModalState, setLinkModalState] = useState<{
+    isOpen: boolean;
+    rawTagToReplace?: string;
+    initialWsName?: string;
+    initialNoteTitle?: string;
+    initialCustomLabel?: string;
+  }>({ isOpen: false });
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const prevContentRef = useRef<string>(block.content || '');
+  const optionsContainerRef = useRef<HTMLDivElement>(null);
+  const subMenuTimeoutRef = useRef<number | null>(null);
+
+  // Click outside to dismiss block options menu and submenu
+  useEffect(() => {
+    if (!showOptionsMenu) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (optionsContainerRef.current && !optionsContainerRef.current.contains(e.target as Node)) {
+        setShowOptionsMenu(false);
+        setShowSubMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showOptionsMenu]);
+
+  // Clean up submenu timer on unmount
+  useEffect(() => {
+    return () => {
+      if (subMenuTimeoutRef.current) {
+        window.clearTimeout(subMenuTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const handleSubMenuEnter = () => {
+    if (subMenuTimeoutRef.current) {
+      window.clearTimeout(subMenuTimeoutRef.current);
+      subMenuTimeoutRef.current = null;
+    }
+    setShowSubMenu(true);
+  };
+
+  const handleSubMenuLeave = () => {
+    if (subMenuTimeoutRef.current) {
+      window.clearTimeout(subMenuTimeoutRef.current);
+    }
+    subMenuTimeoutRef.current = window.setTimeout(() => {
+      setShowSubMenu(false);
+      subMenuTimeoutRef.current = null;
+    }, 150);
+  };
+
+  useEffect(() => {
+    prevContentRef.current = block.content || '';
+  }, [block.content]);
 
   // Auto-resize textarea to fit text without scrollbar
   useEffect(() => {
@@ -82,6 +165,22 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
       textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
     }
   }, [block.content]);
+
+  // Auto-focus management when requested (e.g. on Enter key block creation or Backspace delete)
+  useEffect(() => {
+    if (autoFocus && textareaRef.current) {
+      const el = textareaRef.current;
+      el.focus();
+      const pos =
+        focusPosition === 'end'
+          ? el.value.length
+          : typeof focusPosition === 'number'
+          ? focusPosition
+          : 0;
+      el.setSelectionRange(pos, pos);
+      onFocusHandled?.();
+    }
+  }, [autoFocus, focusPosition, onFocusHandled]);
 
   const handleDragStart = (e: React.DragEvent) => {
     e.dataTransfer.setData('text/plain', index.toString());
@@ -131,6 +230,9 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
 
   const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
+    const prev = prevContentRef.current;
+    prevContentRef.current = val;
+
     if (val.startsWith('/')) {
       setShowSlashMenu(true);
       setSlashQuery(val);
@@ -138,29 +240,206 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
       setShowSlashMenu(false);
     }
     onUpdate({ ...block, content: val });
+
+    // Check if the user just completed a wikilink tag with ]]
+    const prevTags = prev.match(/\[\[([^\]]+)\]\]/g) || [];
+    const newTags = val.match(/\[\[([^\]]+)\]\]/g) || [];
+    if (newTags.length > prevTags.length) {
+      const newlyClosedTag = newTags.find((t, i) => prevTags[i] !== t) || newTags[newTags.length - 1];
+      const inner = newlyClosedTag.slice(2, -2).trim();
+      const pipeParts = inner.split('|');
+      const pathPart = pipeParts[0].trim();
+      const customLabel = pipeParts[1]?.trim();
+      const slashParts = pathPart.split(/[\/#]/);
+      const wsName = slashParts[0]?.trim();
+      const noteTitle = slashParts[1]?.trim();
+
+      setLinkModalState({
+        isOpen: true,
+        rawTagToReplace: newlyClosedTag,
+        initialWsName: wsName || '',
+        initialNoteTitle: noteTitle,
+        initialCustomLabel: customLabel,
+      });
+    }
+  };
+
+  const handleTextareaCopy = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const textarea = textareaRef.current;
+    if (textarea) {
+      const sel = textarea.value.slice(textarea.selectionStart, textarea.selectionEnd);
+      if (sel) {
+        handleBlockCopy(e, sel);
+      }
+    }
+  };
+
+  const handleTextareaCut = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const textarea = textareaRef.current;
+    if (textarea) {
+      const sel = textarea.value.slice(textarea.selectionStart, textarea.selectionEnd);
+      if (sel) {
+        handleBlockCopy(e, sel);
+      }
+    }
+  };
+
+  const handleTextareaPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const isForcePlain = isShiftPasteActive() || !e.clipboardData.types.includes('text/html');
+    const { text } = parseClipboardPaste(e.clipboardData, isForcePlain);
+    e.preventDefault();
+    const textarea = textareaRef.current;
+    if (textarea) {
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      const current = block.content || '';
+      const updated = current.slice(0, start) + text + current.slice(end);
+      prevContentRef.current = updated;
+      onUpdate({ ...block, content: updated });
+      setTimeout(() => {
+        textarea.setSelectionRange(start + text.length, start + text.length);
+      }, 0);
+    }
+  };
+
+  const handleCopyBlock = async () => {
+    try {
+      const textToCopy = block.content || '';
+      const { plain, html } = buildMultiMimeClipboard(textToCopy);
+
+      const blockData: Partial<NoteBlock> = {
+        type: block.type,
+        content: block.content,
+        language: block.language,
+        caption: block.caption,
+        completed: block.completed,
+        fileName: block.fileName,
+        fileSize: block.fileSize,
+        fileType: block.fileType,
+        fileUrl: block.fileUrl,
+        icon: block.icon,
+      };
+
+      // Save to local clipboard with full block metadata
+      setLocalClipboard({
+        text: plain,
+        html,
+        block: blockData,
+      });
+
+      // Save to system clipboard
+      if (navigator.clipboard && window.ClipboardItem) {
+        const item = new ClipboardItem({
+          'text/plain': new Blob([plain], { type: 'text/plain' }),
+          'text/html': new Blob([html], { type: 'text/html' }),
+        });
+        await navigator.clipboard.write([item]);
+      } else if (navigator.clipboard) {
+        await navigator.clipboard.writeText(plain);
+      }
+      setShowOptionsMenu(false);
+    } catch (err) {
+      console.error('Failed to copy block content:', err);
+    }
+  };
+
+  const handlePasteBelow = () => {
+    try {
+      const local = getLocalClipboard();
+      if (!local || (!local.text && !local.block)) return;
+
+      if (local.block) {
+        onInsertBelow(
+          local.block.type || 'paragraph',
+          index,
+          undefined,
+          local.block.content || '',
+          local.block
+        );
+      } else {
+        const nextType: BlockType = block.type === 'todo' ? 'todo' : 'paragraph';
+        onInsertBelow(nextType, index, undefined, local.text);
+      }
+      setShowOptionsMenu(false);
+    } catch (err) {
+      console.error('Failed to paste below block from local clipboard:', err);
+    }
+  };
+
+  const handlePasteOver = () => {
+    try {
+      const local = getLocalClipboard();
+      if (!local || (!local.text && !local.block)) return;
+
+      if (local.block) {
+        onUpdate({
+          ...block,
+          type: local.block.type || block.type,
+          content: local.block.content ?? block.content,
+          language: local.block.language,
+          caption: local.block.caption,
+          completed: local.block.completed,
+          fileName: local.block.fileName,
+          fileSize: local.block.fileSize,
+          fileType: local.block.fileType,
+          fileUrl: local.block.fileUrl,
+          icon: local.block.icon,
+        });
+      } else {
+        onUpdate({ ...block, content: local.text });
+      }
+      setShowOptionsMenu(false);
+      setShowSubMenu(false);
+    } catch (err) {
+      console.error('Failed to replace block with local clipboard:', err);
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (showSlashMenu) return; // handled by slash menu
 
+    const textarea = textareaRef.current;
+    const currentContent = block.content || '';
+    const selStart = textarea ? textarea.selectionStart : currentContent.length;
+    const selEnd = textarea ? textarea.selectionEnd : currentContent.length;
+    const isAtStart = selStart === 0 && selEnd === 0;
+    const isAtEnd = selStart === currentContent.length && selEnd === currentContent.length;
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
+      const beforeText = currentContent.slice(0, selStart);
+      const afterText = currentContent.slice(selStart);
+
       // If in todo, create another todo; otherwise create paragraph
       const nextType: BlockType = block.type === 'todo' ? 'todo' : 'paragraph';
-      onInsertBelow(nextType, index);
-    } else if (e.key === 'Backspace' && block.content === '') {
-      if (block.type !== 'paragraph') {
+      onInsertBelow(nextType, index, beforeText, afterText);
+    } else if (e.key === 'Backspace' && isAtStart) {
+      if (index > 0) {
+        e.preventDefault();
+        onMergeWithPrevious(index);
+      } else if (block.content === '' && block.type !== 'paragraph') {
         e.preventDefault();
         onUpdate({ ...block, type: 'paragraph' });
-      } else if (totalBlocks > 1) {
+      }
+    } else if (e.key === 'Delete' && isAtEnd) {
+      if (index < totalBlocks - 1) {
         e.preventDefault();
-        onDelete(block.id);
+        onMergeWithNext(index);
       }
     }
   };
 
   const handleCopyCode = async () => {
     try {
+      const blockData: Partial<NoteBlock> = {
+        type: 'code',
+        content: block.content,
+        language: block.language,
+      };
+      setLocalClipboard({
+        text: block.content,
+        block: blockData,
+      });
       await navigator.clipboard.writeText(block.content);
       setCopiedCode(true);
       setTimeout(() => setCopiedCode(false), 2000);
@@ -210,30 +489,14 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
     return `${(bytes / 1048576).toFixed(1)} MB`;
   };
 
-  // Detect cross-workspace links syntax [[workspace/nota]] or [[workspace]]
-  const crossWsMatches: { raw: string; wsName: string; noteTitle?: string }[] = [];
-  if (block.content && typeof block.content === 'string') {
-    const regex = /\[\[(.*?)\]\]/g;
-    let match;
-    while ((match = regex.exec(block.content)) !== null) {
-      const full = match[1].trim();
-      if (full) {
-        const parts = full.split(/[\/#]/);
-        const wsName = parts[0]?.trim();
-        const noteTitle = parts[1]?.trim();
-        if (wsName) {
-          crossWsMatches.push({ raw: match[0], wsName, noteTitle });
-        }
-      }
-    }
-  }
+  // Detect if block contains embedded wikilinks [[workspace/nota]] or [[workspace]]
+  const hasLinks = block.content ? /\[\[(.*?)\]\]/.test(block.content) : false;
 
   return (
     <div
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => {
         setIsHovered(false);
-        setShowOptionsMenu(false);
       }}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -258,7 +521,7 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
 
       {/* Block Hover Gutter Handle - strictly in the left margin, 0% overlap with content */}
       <div className="absolute left-1 top-1.5 z-20">
-        <div className="relative">
+        <div ref={optionsContainerRef} className="relative">
           <button
             draggable
             onDragStart={handleDragStart}
@@ -301,27 +564,73 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
               >
                 <Copy className="w-3.5 h-3.5" /> Duplica
               </button>
+              <button
+                onClick={handleCopyBlock}
+                className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-700 text-left"
+              >
+                <Copy className="w-3.5 h-3.5 text-neutral-500" /> Copia
+              </button>
+              <button
+                onClick={handlePasteBelow}
+                disabled={!hasLocalClipboardContent}
+                title={hasLocalClipboardContent ? 'Incolla dalla clipboard locale sotto questo blocco' : 'Nessun contenuto nella clipboard locale'}
+                className={`w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors ${
+                  hasLocalClipboardContent
+                    ? 'hover:bg-neutral-100 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-300 cursor-pointer'
+                    : 'opacity-40 cursor-not-allowed text-neutral-400 dark:text-neutral-500'
+                }`}
+              >
+                <ClipboardPaste className="w-3.5 h-3.5 text-neutral-500" /> Incolla sotto
+              </button>
+
               <div className="my-1 border-t border-neutral-100 dark:border-neutral-700" />
-              <div>
+
+              {/* Conventional flyout submenu for "Altre.." */}
+              <div
+                className="relative group/submenu"
+                onMouseEnter={handleSubMenuEnter}
+                onMouseLeave={handleSubMenuLeave}
+              >
                 <button
                   onClick={() => setShowSubMenu(!showSubMenu)}
                   className="w-full flex items-center justify-between px-3 py-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-700 text-left font-medium text-neutral-800 dark:text-neutral-200"
                 >
                   <span className="flex items-center gap-2">
-                    <MoreHorizontal className="w-3.5 h-3.5 text-neutral-500" /> Altre azioni
+                    <MoreHorizontal className="w-3.5 h-3.5 text-neutral-500" /> Altre..
                   </span>
-                  <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showSubMenu ? 'rotate-180' : ''}`} />
+                  <ChevronRight className="w-3.5 h-3.5 text-neutral-400" />
                 </button>
 
                 {showSubMenu && (
-                  <div className="bg-neutral-50 dark:bg-neutral-900/60 py-1 my-1 border-y border-neutral-200 dark:border-neutral-700">
+                  <div
+                    className="absolute left-full top-0 ml-1 w-56 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg shadow-xl py-1 text-xs text-neutral-700 dark:text-neutral-300 animate-in fade-in zoom-in-95 duration-100 z-50 before:absolute before:-left-3 before:top-0 before:bottom-0 before:w-3 before:content-['']"
+                    onMouseEnter={handleSubMenuEnter}
+                    onMouseLeave={handleSubMenuLeave}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <button
+                      onClick={handlePasteOver}
+                      disabled={!hasLocalClipboardContent}
+                      title={hasLocalClipboardContent ? 'Sostituisci il blocco con il contenuto della clipboard locale' : 'Nessun contenuto nella clipboard locale'}
+                      className={`w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors ${
+                        hasLocalClipboardContent
+                          ? 'hover:bg-neutral-100 dark:hover:bg-neutral-700 text-neutral-800 dark:text-neutral-200 cursor-pointer'
+                          : 'opacity-40 cursor-not-allowed text-neutral-400 dark:text-neutral-500'
+                      }`}
+                    >
+                      <ClipboardPaste className="w-3.5 h-3.5 text-blue-500" /> Sostituisci con clipboard
+                    </button>
+
+                    <div className="my-1 border-t border-neutral-100 dark:border-neutral-700" />
+
                     <button
                       onClick={() => {
                         onMoveUp(index);
                         setShowOptionsMenu(false);
+                        setShowSubMenu(false);
                       }}
                       disabled={index === 0}
-                      className="w-full flex items-center gap-2 px-4 py-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-700 disabled:opacity-30 disabled:pointer-events-none text-left text-neutral-700 dark:text-neutral-300"
+                      className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-700 disabled:opacity-30 disabled:pointer-events-none text-left text-neutral-700 dark:text-neutral-300"
                     >
                       <ArrowUp className="w-3.5 h-3.5" /> Sposta su
                     </button>
@@ -329,9 +638,10 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
                       onClick={() => {
                         onMoveDown(index);
                         setShowOptionsMenu(false);
+                        setShowSubMenu(false);
                       }}
                       disabled={index === totalBlocks - 1}
-                      className="w-full flex items-center gap-2 px-4 py-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-700 disabled:opacity-30 disabled:pointer-events-none text-left text-neutral-700 dark:text-neutral-300"
+                      className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-700 disabled:opacity-30 disabled:pointer-events-none text-left text-neutral-700 dark:text-neutral-300"
                     >
                       <ArrowDown className="w-3.5 h-3.5" /> Sposta giù
                     </button>
@@ -346,18 +656,22 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
                           fileUrl: undefined,
                         });
                         setShowOptionsMenu(false);
+                        setShowSubMenu(false);
                       }}
-                      className="w-full flex items-center gap-2 px-4 py-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-700 text-left text-neutral-700 dark:text-neutral-300"
+                      className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-neutral-100 dark:hover:bg-neutral-700 text-left text-neutral-700 dark:text-neutral-300"
                     >
                       <Trash2 className="w-3.5 h-3.5 opacity-60" /> Pulisci
                     </button>
-                    <div className="my-1 border-t border-neutral-200 dark:border-neutral-800" />
+
+                    <div className="my-1 border-t border-neutral-100 dark:border-neutral-700" />
+
                     <button
                       onClick={() => {
                         onDelete(block.id);
                         setShowOptionsMenu(false);
+                        setShowSubMenu(false);
                       }}
-                      className="w-full flex items-center gap-2 px-4 py-1.5 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 text-left"
+                      className="w-full flex items-center gap-2 px-3 py-1.5 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 text-left"
                     >
                       <Trash2 className="w-3.5 h-3.5" /> Elimina
                     </button>
@@ -376,6 +690,10 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
           onSelect={(selectedType) => {
             setShowSlashMenu(false);
             setSlashQuery('');
+            if (selectedType === 'page_link') {
+              setLinkModalState({ isOpen: true });
+              return;
+            }
             if (block.content.startsWith('/')) {
               onUpdate({ ...block, type: selectedType, content: '' });
             } else {
@@ -397,47 +715,44 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
           block.type === 'heading1' ||
           block.type === 'heading2' ||
           block.type === 'heading3') && (
-          <textarea
-            ref={textareaRef}
-            data-block-id={block.id}
-            rows={1}
-            value={block.content}
-            onChange={handleTextChange}
-            onKeyDown={handleKeyDown}
-            placeholder={
-              block.type === 'heading1'
-                ? 'Intestazione 1'
-                : block.type === 'heading2'
-                ? 'Intestazione 2'
-                : block.type === 'heading3'
-                ? 'Intestazione 3'
-                : 'Scrivi qualcosa, oppure digita "/" per i blocchi multimediali...'
-            }
-            className={`w-full bg-transparent resize-none border-none outline-none leading-relaxed transition-colors ${
-              block.type === 'heading1'
-                ? 'font-display text-2xl font-bold tracking-tight text-neutral-900 dark:text-neutral-50 placeholder:text-neutral-300 dark:placeholder:text-neutral-600'
-                : block.type === 'heading2'
-                ? 'font-display text-xl font-semibold tracking-tight text-neutral-900 dark:text-neutral-100 placeholder:text-neutral-300 dark:placeholder:text-neutral-600 mt-2'
-                : block.type === 'heading3'
-                ? 'font-display text-base font-semibold text-neutral-800 dark:text-neutral-200 placeholder:text-neutral-300 dark:placeholder:text-neutral-600 mt-1'
-                : 'text-neutral-800 dark:text-neutral-200 placeholder:text-neutral-400 dark:placeholder:text-neutral-500 text-sm'
-            }`}
-          />
-        )}
-
-        {/* To-Do Checklist Block */}
-        {block.type === 'todo' && (
-          <div className="flex items-start gap-2.5 my-0.5">
-            <button
-              onClick={() => onUpdate({ ...block, completed: !block.completed })}
-              className={`mt-1 w-4 h-4 rounded flex items-center justify-center border transition-all ${
-                block.completed
-                  ? 'bg-neutral-900 dark:bg-neutral-100 border-neutral-900 dark:border-neutral-100 text-white dark:text-neutral-900'
-                  : 'border-neutral-300 dark:border-neutral-600 hover:border-neutral-400 dark:hover:border-neutral-500'
-              }`}
-            >
-              {block.completed && <Check className="w-3 h-3 stroke-[3]" />}
-            </button>
+          hasLinks ? (
+            <InlineRichEditor
+              block={block}
+              index={index}
+              totalBlocks={totalBlocks}
+              autoFocus={autoFocus}
+              focusPosition={focusPosition}
+              onFocusHandled={onFocusHandled}
+              onUpdate={onUpdate}
+              onInsertBelow={onInsertBelow}
+              onMergeWithPrevious={onMergeWithPrevious}
+              onMergeWithNext={onMergeWithNext}
+              showSlashMenu={showSlashMenu}
+              onSlashTrigger={(val) => {
+                setShowSlashMenu(true);
+                setSlashQuery(val);
+              }}
+              placeholder={
+                block.type === 'heading1'
+                  ? 'Intestazione 1'
+                  : block.type === 'heading2'
+                  ? 'Intestazione 2'
+                  : block.type === 'heading3'
+                  ? 'Intestazione 3'
+                  : 'Scrivi qualcosa, oppure digita "/" per i blocchi multimediali...'
+              }
+              style={{ color: 'var(--theme-text-main)' }}
+              className={
+                block.type === 'heading1'
+                  ? 'font-display text-2xl font-bold tracking-tight'
+                  : block.type === 'heading2'
+                  ? 'font-display text-xl font-semibold tracking-tight mt-2'
+                  : block.type === 'heading3'
+                  ? 'font-display text-base font-semibold mt-1'
+                  : 'text-sm'
+              }
+            />
+          ) : (
             <textarea
               ref={textareaRef}
               data-block-id={block.id}
@@ -445,13 +760,93 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
               value={block.content}
               onChange={handleTextChange}
               onKeyDown={handleKeyDown}
-              placeholder="Attività da completare..."
-              className={`flex-1 bg-transparent resize-none border-none outline-none text-sm leading-relaxed transition-all ${
-                block.completed
-                  ? 'line-through text-neutral-400 dark:text-neutral-500'
-                  : 'text-neutral-800 dark:text-neutral-200'
+              onCopy={handleTextareaCopy}
+              onCut={handleTextareaCut}
+              onPaste={handleTextareaPaste}
+              placeholder={
+                block.type === 'heading1'
+                  ? 'Intestazione 1'
+                  : block.type === 'heading2'
+                  ? 'Intestazione 2'
+                  : block.type === 'heading3'
+                  ? 'Intestazione 3'
+                  : 'Scrivi qualcosa, oppure digita "/" per i blocchi multimediali...'
+              }
+              style={{ color: 'var(--theme-text-main)' }}
+              className={`w-full bg-transparent resize-none border-none outline-none leading-relaxed transition-colors ${
+                block.type === 'heading1'
+                  ? 'font-display text-2xl font-bold tracking-tight'
+                  : block.type === 'heading2'
+                  ? 'font-display text-xl font-semibold tracking-tight mt-2'
+                  : block.type === 'heading3'
+                  ? 'font-display text-base font-semibold mt-1'
+                  : 'text-sm'
               }`}
             />
+          )
+        )}
+
+        {/* To-Do Checklist Block */}
+        {block.type === 'todo' && (
+          <div className="flex items-start gap-2.5 my-0.5">
+            <button
+              onClick={() => onUpdate({ ...block, completed: !block.completed })}
+              style={
+                block.completed
+                  ? {
+                      backgroundColor: 'var(--theme-accent)',
+                      borderColor: 'var(--theme-accent)',
+                      color: 'var(--theme-accent-text)',
+                    }
+                  : {
+                      borderColor: 'var(--theme-border)',
+                    }
+              }
+              className="mt-1 w-4 h-4 rounded flex items-center justify-center border transition-all"
+            >
+              {block.completed && <Check className="w-3 h-3 stroke-[3]" />}
+            </button>
+            {hasLinks ? (
+              <InlineRichEditor
+                block={block}
+                index={index}
+                totalBlocks={totalBlocks}
+                autoFocus={autoFocus}
+                focusPosition={focusPosition}
+                onFocusHandled={onFocusHandled}
+                onUpdate={onUpdate}
+                onInsertBelow={onInsertBelow}
+                onMergeWithPrevious={onMergeWithPrevious}
+                onMergeWithNext={onMergeWithNext}
+                showSlashMenu={showSlashMenu}
+                onSlashTrigger={(val) => {
+                  setShowSlashMenu(true);
+                  setSlashQuery(val);
+                }}
+                placeholder="Attività da completare..."
+                style={{ color: 'var(--theme-text-main)' }}
+                className={`flex-1 text-sm ${block.completed ? 'line-through opacity-50' : ''}`}
+              />
+            ) : (
+              <textarea
+                ref={textareaRef}
+                data-block-id={block.id}
+                rows={1}
+                value={block.content}
+                onChange={handleTextChange}
+                onKeyDown={handleKeyDown}
+                onCopy={handleTextareaCopy}
+                onCut={handleTextareaCut}
+                onPaste={handleTextareaPaste}
+                placeholder="Attività da completare..."
+                style={{ color: 'var(--theme-text-main)' }}
+                className={`flex-1 bg-transparent resize-none border-none outline-none text-sm leading-relaxed transition-all ${
+                  block.completed
+                    ? 'line-through opacity-50'
+                    : ''
+                }`}
+              />
+            )}
           </div>
         )}
 
@@ -503,6 +898,9 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
               rows={3}
               value={block.content}
               onChange={(e) => onUpdate({ ...block, content: e.target.value })}
+              onCopy={handleTextareaCopy}
+              onCut={handleTextareaCut}
+              onPaste={handleTextareaPaste}
               placeholder="// Inserisci o incolla qui il tuo codice..."
               className="w-full p-3 font-mono text-xs bg-transparent resize-none border-none outline-none leading-relaxed text-emerald-300/90 placeholder:text-neutral-600"
               spellCheck={false}
@@ -697,72 +1095,131 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
 
         {/* Callout Block */}
         {block.type === 'callout' && (
-          <div className="my-2 p-3.5 rounded-xl bg-amber-50/70 dark:bg-amber-950/20 border border-amber-200/70 dark:border-amber-800/40 flex items-start gap-3">
+          <div
+            style={{
+              backgroundColor: 'var(--theme-callout-bg)',
+              borderColor: 'var(--theme-border)',
+              color: 'var(--theme-text-main)',
+            }}
+            className="my-2 p-3.5 rounded-xl border flex items-start gap-3"
+          >
             <span className="text-lg leading-none mt-0.5">{block.icon || '💡'}</span>
-            <textarea
-              ref={textareaRef}
-              data-block-id={block.id}
-              rows={1}
-              value={block.content}
-              onChange={handleTextChange}
-              onKeyDown={handleKeyDown}
-              placeholder="Scrivi una nota in evidenza o un consiglio..."
-              className="flex-1 bg-transparent resize-none border-none outline-none text-xs text-neutral-800 dark:text-neutral-200 leading-relaxed placeholder:text-neutral-400"
-            />
+            {hasLinks ? (
+              <InlineRichEditor
+                block={block}
+                index={index}
+                totalBlocks={totalBlocks}
+                autoFocus={autoFocus}
+                focusPosition={focusPosition}
+                onFocusHandled={onFocusHandled}
+                onUpdate={onUpdate}
+                onInsertBelow={onInsertBelow}
+                onMergeWithPrevious={onMergeWithPrevious}
+                onMergeWithNext={onMergeWithNext}
+                showSlashMenu={showSlashMenu}
+                onSlashTrigger={(val) => {
+                  setShowSlashMenu(true);
+                  setSlashQuery(val);
+                }}
+                placeholder="Scrivi una nota in evidenza o un consiglio..."
+                style={{ color: 'var(--theme-text-main)' }}
+                className="flex-1 text-xs"
+              />
+            ) : (
+              <textarea
+                ref={textareaRef}
+                data-block-id={block.id}
+                rows={1}
+                value={block.content}
+                onChange={handleTextChange}
+                onKeyDown={handleKeyDown}
+                onCopy={handleTextareaCopy}
+                onCut={handleTextareaCut}
+                onPaste={handleTextareaPaste}
+                placeholder="Scrivi una nota in evidenza o un consiglio..."
+                style={{ color: 'var(--theme-text-main)' }}
+                className="flex-1 bg-transparent resize-none border-none outline-none text-xs leading-relaxed"
+              />
+            )}
           </div>
         )}
 
         {/* Quote Block */}
         {block.type === 'quote' && (
-          <div className="my-2 pl-3 border-l-2 border-neutral-300 dark:border-neutral-600">
-            <textarea
-              ref={textareaRef}
-              data-block-id={block.id}
-              rows={1}
-              value={block.content}
-              onChange={handleTextChange}
-              onKeyDown={handleKeyDown}
-              placeholder="Inserisci una citazione..."
-              className="w-full bg-transparent resize-none border-none outline-none italic text-sm text-neutral-700 dark:text-neutral-300 leading-relaxed placeholder:text-neutral-400"
-            />
-          </div>
-        )}
-
-        {/* Cross-workspace page links (Always open in a separate tab, two icons: workspace icon & page icon, no link icon) */}
-        {crossWsMatches.length > 0 && (
-          <div className="flex flex-wrap items-center gap-1.5 mt-2 select-none">
-            {crossWsMatches.map((m, idx) => {
-              const link = resolveCrossWorkspaceLink(m.wsName, m.noteTitle);
-              return (
-                <a
-                  key={idx}
-                  href={link.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                  }}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-neutral-100/90 hover:bg-neutral-200/90 dark:bg-neutral-800/80 dark:hover:bg-neutral-700/80 border border-neutral-200/80 dark:border-neutral-700 text-xs font-medium text-neutral-800 dark:text-neutral-200 transition-colors shadow-2xs group/crossLink hover:border-neutral-300 dark:hover:border-neutral-600 cursor-pointer"
-                  title={`Apri "${link.noteTitle}" (${link.workspaceName}) in una nuova scheda`}
-                >
-                  {/* Icona del workspace sulla sinistra del nome workspace */}
-                  <span className="text-xs shrink-0 select-none leading-none">{link.workspaceIcon}</span>
-                  <span className="font-semibold text-neutral-900 dark:text-neutral-100">{link.workspaceName}</span>
-
-                  {/* Separatore */}
-                  <span className="text-neutral-400 dark:text-neutral-500 font-normal select-none">/</span>
-
-                  {/* Icona della pagina sulla sinistra del nome pagina */}
-                  <span className="text-xs shrink-0 select-none leading-none">{link.noteIcon}</span>
-                  <span className="truncate max-w-[200px] text-neutral-700 dark:text-neutral-300 group-hover/crossLink:underline">
-                    {link.noteTitle}
-                  </span>
-                </a>
-              );
-            })}
+          <div
+            style={{ borderLeftColor: 'var(--theme-accent)' }}
+            className="my-2 pl-3 border-l-2"
+          >
+            {hasLinks ? (
+              <InlineRichEditor
+                block={block}
+                index={index}
+                totalBlocks={totalBlocks}
+                autoFocus={autoFocus}
+                focusPosition={focusPosition}
+                onFocusHandled={onFocusHandled}
+                onUpdate={onUpdate}
+                onInsertBelow={onInsertBelow}
+                onMergeWithPrevious={onMergeWithPrevious}
+                onMergeWithNext={onMergeWithNext}
+                showSlashMenu={showSlashMenu}
+                onSlashTrigger={(val) => {
+                  setShowSlashMenu(true);
+                  setSlashQuery(val);
+                }}
+                placeholder="Inserisci una citazione..."
+                style={{ color: 'var(--theme-text-main)' }}
+                className="w-full italic text-sm"
+              />
+            ) : (
+              <textarea
+                ref={textareaRef}
+                data-block-id={block.id}
+                rows={1}
+                value={block.content}
+                onChange={handleTextChange}
+                onKeyDown={handleKeyDown}
+                onCopy={handleTextareaCopy}
+                onCut={handleTextareaCut}
+                onPaste={handleTextareaPaste}
+                placeholder="Inserisci una citazione..."
+                style={{ color: 'var(--theme-text-main)' }}
+                className="w-full bg-transparent resize-none border-none outline-none italic text-sm leading-relaxed"
+              />
+            )}
           </div>
         )}
       </div>
+
+      {/* Modal for creating or editing a link from slash command or tag closing */}
+      {linkModalState.isOpen && (
+        <PageLinkModal
+          isOpen={linkModalState.isOpen}
+          onClose={() => setLinkModalState({ isOpen: false })}
+          initialWsName={linkModalState.initialWsName}
+          initialNoteTitle={linkModalState.initialNoteTitle}
+          initialCustomLabel={linkModalState.initialCustomLabel}
+          onSave={(wsName, noteTitle, customLabel) => {
+            const target = noteTitle ? `${wsName}/${noteTitle}` : wsName;
+            const tag = customLabel ? `[[${target}|${customLabel}]]` : `[[${target}]]`;
+
+            let updatedContent = block.content || '';
+            if (
+              linkModalState.rawTagToReplace &&
+              updatedContent.includes(linkModalState.rawTagToReplace)
+            ) {
+              updatedContent = updatedContent.replace(linkModalState.rawTagToReplace, tag);
+            } else {
+              const cleanContent = updatedContent.startsWith('/') ? '' : updatedContent;
+              updatedContent = cleanContent ? `${cleanContent} ${tag} ` : `${tag} `;
+            }
+
+            prevContentRef.current = updatedContent;
+            onUpdate({ ...block, content: updatedContent });
+            setLinkModalState({ isOpen: false });
+          }}
+        />
+      )}
     </div>
   );
 };

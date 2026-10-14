@@ -1,14 +1,19 @@
 {
   "name": "react-example",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "version:bump": "node scripts/bump-version.mjs --auto",
+    "version:patch": "node scripts/bump-version.mjs --type=patch",
+    "version:minor": "node scripts/bump-version.mjs --type=minor",
+    "version:major": "node scripts/bump-version.mjs --type=major",
+    "prepare": "node scripts/install-hooks.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

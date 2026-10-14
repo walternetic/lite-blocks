@@ -11,10 +11,13 @@ import {
   Paperclip,
   Quote,
   Lightbulb,
+  Link2,
 } from 'lucide-react';
 
+export type SlashItemType = BlockType | 'page_link';
+
 interface SlashItem {
-  type: BlockType;
+  type: SlashItemType;
   title: string;
   description: string;
   icon: React.ReactNode;
@@ -92,11 +95,18 @@ const SLASH_ITEMS: SlashItem[] = [
     icon: <Quote className="w-4 h-4 text-neutral-400" />,
     keywords: ['citazione', 'quote', 'frase'],
   },
+  {
+    type: 'page_link',
+    title: 'Link a Pagina',
+    description: 'Collega una nota o workspace nel flusso del testo',
+    icon: <Link2 className="w-4 h-4 text-indigo-500" />,
+    keywords: ['link', 'collegamento', 'pagina', 'workspace', 'nota', 'page'],
+  },
 ];
 
 interface SlashCommandMenuProps {
   searchQuery?: string;
-  onSelect: (type: BlockType) => void;
+  onSelect: (type: SlashItemType) => void;
   onClose: () => void;
   position?: { top: number; left: number };
 }

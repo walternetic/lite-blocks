@@ -180,13 +180,11 @@ export function resolveCrossWorkspaceLink(
     );
   }
 
-  // If no note was specified or found, fallback to the first note of that workspace
-  const finalNote =
-    matchedNote ||
-    (!noteTitleOrId && targetNotes.length > 0 ? targetNotes[0] : undefined);
+  // If a note was explicitly specified, resolve it. Do not automatically bind the first note of the workspace.
+  const finalNote = matchedNote;
 
-  let rawTitle = finalNote?.title || noteTitleOrId || wsName;
-  let noteIcon = finalNote?.icon || '📄';
+  let rawTitle = finalNote?.title || noteTitleOrId || '';
+  let noteIcon = finalNote?.icon || (noteTitleOrId ? '📄' : '');
 
   // If title ends with the exact emoji of noteIcon, remove the redundant duplicate emoji
   if (noteIcon && rawTitle.endsWith(noteIcon)) {

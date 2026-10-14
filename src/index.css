@@ -2,25 +2,40 @@
 
 @layer base {
   :root {
-    --color-bg-primary: #ffffff;
-    --color-bg-secondary: #fbfbfa;
-    --color-border: #ececeb;
-  }
-
-  .dark {
-    --color-bg-primary: #191919;
-    --color-bg-secondary: #202020;
-    --color-border: #2e2e2e;
+    --theme-bg-app: #ffffff;
+    --theme-bg-sidebar: #f7f7f5;
+    --theme-bg-surface: #ffffff;
+    --theme-bg-hover: #efefed;
+    --theme-border: #e9e9e7;
+    --theme-text-main: #2f3437;
+    --theme-text-muted: #787774;
+    --theme-accent: #2383e2;
+    --theme-accent-hover: #1d6dc0;
+    --theme-accent-text: #ffffff;
+    --theme-code-bg: #f1f1ef;
+    --theme-callout-bg: #f7f6f3;
   }
 
   body {
     font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    background-color: var(--theme-bg-app);
+    color: var(--theme-text-main);
+  }
+
+  input, textarea, select {
+    color: inherit;
+  }
+
+  ::placeholder {
+    color: var(--theme-text-muted) !important;
+    opacity: 0.75;
   }
 
   h1, h2, h3, h4, h5, h6, .font-display {
     font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    color: inherit;
   }
 
   code, pre, .font-mono {
@@ -43,6 +58,19 @@
   background: rgba(155, 155, 155, 0.3);
   border-radius: 9999px;
 }
+
+/* Document and page link component selection highlighting */
+::selection {
+  background-color: var(--theme-accent);
+  color: var(--theme-accent-text);
+}
+
+.page-link-badge::selection,
+.page-link-badge *::selection {
+  background-color: var(--theme-accent) !important;
+  color: var(--theme-accent-text) !important;
+}
+
 
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(155, 155, 155, 0.5);
