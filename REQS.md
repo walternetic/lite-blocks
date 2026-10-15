@@ -66,12 +66,19 @@ Lite Blocks resolves this dichotomy by providing:
   - Users shall be able to initiate a continuous selection from an arbitrary character in any block and drag across block boundaries to an arbitrary character in any subsequent or preceding block via mouse drag or keyboard navigation (`Shift+Arrow` keys).
   - Active cross-block selection highlights shall be rendered through an SVG overlay layer drawing subpixel highlight rectangles derived from native `Range.getClientRects()`.
   - When text is selected across blocks, actuating clipboard copy (`Ctrl+C` / `Cmd+C`) or cut (`Ctrl+X` / `Cmd+X` / `Shift+Delete`) shall populate the system dual-MIME clipboard with the exact selected text slice. Actuating deletion (`Backspace` / `Delete`) or typing a printable replacement character shall perform an atomic state mutation that merges the unselected prefix of the starting block with the unselected suffix of the ending block, and removes intermediate blocks.
+- **FR-2.24**: The system shall support hierarchical keyboard selection via the `Ctrl+A` (or `Cmd+A` on macOS) shortcut:
+  - The first actuation of `Ctrl+A` within any active block (paragraph, heading, to-do, quote, callout, code snippet, or media caption) or the document title shall select the entire text content of the active element.
+  - A second consecutive actuation of `Ctrl+A` (or actuating `Ctrl+A` when the current element is already fully selected or empty) shall escalate the selection to encompass the entire document, selecting all blocks on the page via the virtual multi-block selection subsystem (`MultiBlockSelection`) and SVG highlight overlay.
+  - When the entire page is selected, standard operations (copy `Ctrl+C`, cut `Ctrl+X` / `Shift+Delete`, deletion `Backspace` / `Delete`, or replacement by typing) shall execute atomically across the entire block canvas.
 
 ### FR-3: Theming & Visual Ergonomics
 - **FR-3.1**: The system shall provide a curated palette of visual themes covering both low-luminance (dark) and high-luminance (light) environments.
 - **FR-3.2**: All themes shall satisfy the WCAG AA accessibility specification, guaranteeing a minimum contrast ratio of 4.5:1 for body and interface text against surrounding backgrounds.
 - **FR-3.3**: The system shall apply theme selections immediately across all user interface surfaces, including document navigation panels, headers, workspaces, and block renderers.
 - **FR-3.4**: The system shall persist the chosen theme independently per workspace.
+- **FR-3.5**: The theme toggle control in the navigation sidebar shall visually reflect the currently active mode (displaying the Sun icon and "Chiaro" in light mode, and the Moon icon and "Scuro" in dark mode).
+- **FR-3.6**: The theme dropdown selector shall dynamically filter and expose exclusively the visual themes corresponding to the currently active luminance mode (light themes in light mode, dark themes in dark mode).
+- **FR-3.7**: Text selection highlighting across both native single-block selections and cross-block SVG overlays shall maintain visual and chromatic consistency, utilizing accent-tinted translucent backgrounds (`color-mix(in srgb, var(--theme-accent) 28%, transparent)`) while preserving readable text foreground contrast (`color: inherit;`).
 
 ### FR-4: Version Management & Release Governance
 - **FR-4.1**: The system shall track and manage its release progression according to the Semantic Versioning specification (SemVer 2.0.0: `MAJOR.MINOR.PATCH`).

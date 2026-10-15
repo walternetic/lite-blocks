@@ -48,7 +48,7 @@ export const PageLinkBadge: React.FC<PageLinkBadgeProps> = ({
         borderColor: 'var(--theme-border)',
         color: 'var(--theme-text-main)',
       }}
-      className="page-link-badge inline-flex items-center gap-1.5 px-2 py-0.5 mx-1 my-0.5 rounded-lg border text-xs font-medium cursor-pointer hover:border-[var(--theme-accent)] transition-all shadow-2xs align-middle group/link selection:bg-[var(--theme-accent)] selection:text-[var(--theme-accent-text)]"
+      className="page-link-badge inline-flex items-center gap-1.5 px-2 py-0.5 mx-1 my-0.5 rounded-lg border text-xs font-medium cursor-pointer hover:border-[var(--theme-accent)] transition-all shadow-2xs align-middle group/link"
       title={`Apri ${link.noteTitle ? `"${link.noteTitle}" (${link.workspaceName})` : `workspace "${link.workspaceName}"`} in una nuova scheda · Tasto destro o Shift+Clic: modifica`}
     >
       {/* Workspace Icon & Name */}

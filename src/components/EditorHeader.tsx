@@ -28,6 +28,7 @@ interface EditorHeaderProps {
     fromIndex: number | 'title',
     currentClientX: number
   ) => void;
+  onSelectAllPage?: () => void;
   onUpdateNote: (fields: Partial<Note>) => void;
 }
 
@@ -37,6 +38,7 @@ export const EditorHeader: React.FC<EditorHeaderProps> = ({
   focusedBlockTarget,
   onFocusHandled,
   onNavigateCursor,
+  onSelectAllPage,
   onUpdateNote,
 }) => {
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -218,7 +220,21 @@ export const EditorHeader: React.FC<EditorHeaderProps> = ({
           value={note.title}
           onChange={(e) => onUpdateNote({ title: e.target.value })}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') {
+            if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A') && !e.shiftKey && !e.altKey) {
+              const el = titleTextareaRef.current;
+              if (el) {
+                const len = el.value.length;
+                if (len === 0 || (el.selectionStart === 0 && el.selectionEnd === len)) {
+                  e.preventDefault();
+                  onSelectAllPage?.();
+                  return;
+                } else {
+                  e.preventDefault();
+                  el.select();
+                  return;
+                }
+              }
+            } else if (e.key === 'Enter') {
               e.preventDefault();
               const firstBlock = document.querySelector<HTMLTextAreaElement>(
                 '[data-block-id]:not([data-block-id="note-title"])'

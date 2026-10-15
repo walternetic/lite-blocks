@@ -91,6 +91,7 @@ In [`src/components/Sidebar.tsx`](src/components/Sidebar.tsx), the active applic
 
 ## 4. Theme Engine Contract
 
+### 4.1 CSS Custom Properties & Semantic Token Hierarchy
 All visual surfaces consume dynamic CSS Custom Properties declared on `:root`:
 - `--theme-bg-app`: Root viewport background.
 - `--theme-bg-sidebar`: Navigation drawer background.
@@ -99,8 +100,46 @@ All visual surfaces consume dynamic CSS Custom Properties declared on `:root`:
 - `--theme-border`: Divider and bounding borders.
 - `--theme-text-main`: Primary content (contrast ratio >= 4.5:1, WCAG AA).
 - `--theme-text-muted`: Secondary metadata and placeholders (contrast ratio >= 4.5:1).
-- `--theme-accent`: Focus rings and brand indicators.
+- `--theme-accent`: Focus rings, brand indicators, and selection tint base.
 - `--theme-accent-text`: Text on top of accent backgrounds.
+
+### 4.2 State-Indicating Mode Toggle & Luminance-Filtered Palette (`ThemeDropdown.tsx`)
+1. **State-Indicating Button Ergonomics**:
+   - The theme mode toggle button inside the navigation sidebar displays the icon and label reflecting the **current** active environment:
+     - When `currentTheme.mode === 'light'`: displays the Sun icon (`Sun`) and the label "Chiaro".
+     - When `currentTheme.mode === 'dark'`: displays the Moon icon (`Moon`) and the label "Scuro".
+   - Clicking the toggle alternates between light and dark modes, restoring the last selected theme for that mode (`lastLightThemeRef` / `lastDarkThemeRef`).
+2. **Mode-Filtered Theme Palette**:
+   - The theme picker popover dropdown filters the complete list of themes to display exclusively those matching the active mode:
+     ```typescript
+     const filteredThemes = THEMES.filter((t) => t.mode === currentTheme.mode);
+     ```
+   - Light themes are visible only in light mode, and dark themes are visible only in dark mode, eliminating visual clutter and cognitive overhead.
+
+### 4.3 Identifier Normalization & Backward Compatibility (`themes.ts`)
+1. **Bright Minimal Renaming**:
+   - The default light theme has been formalized as `name: 'Bright Minimal'` with canonical identifier `id: 'bright-minimal'`.
+   - `DEFAULT_THEME_ID` is set to `'bright-minimal'`.
+2. **Backward-Compatibility Resolver (`getThemeById`)**:
+   - To guarantee zero breaking changes for existing client workspaces stored in `localStorage` or cloud Firestore:
+     ```typescript
+     export function getThemeById(id: string): Theme {
+       const normalizedId = id === 'notion-minimal' ? 'bright-minimal' : id;
+       return THEMES.find((t) => t.id === normalizedId) || DEFAULT_THEME;
+     }
+     ```
+
+### 4.4 Selection Highlight Chromatic Consistency
+1. **Native & Virtual Selection Parity**:
+   - Single-block native browser text selections (`::selection`) and cross-block SVG overlays (`SelectionOverlay.tsx`) utilize identical chromatic formulas:
+     ```css
+     ::selection {
+       background-color: color-mix(in srgb, var(--theme-accent) 28%, transparent) !important;
+       color: inherit !important;
+     }
+     ```
+   - SVG overlay `<rect>` elements render with `fill="var(--theme-accent)"` and `fillOpacity={0.28}`.
+   - Text foreground color is preserved (`color: inherit`), ensuring high contrast against dark or light background surfaces without inverted text flashing during cross-block transit.
 
 ---
 
@@ -447,6 +486,22 @@ export interface MultiBlockSelection {
    - Slices and concatenates `prefix` (start block content prior to start offset) and `suffix` (end block content after end offset), inserting optional typed character in-between.
    - Updates start block content, deletes all intermediate blocks and end block.
    - Focuses the start block with caret precisely positioned at the merge boundary (`targetOffset`).
+
+#### 7.8.7 Hierarchical Document Selection Protocol (`Ctrl+A` / `Cmd+A`)
+To reconcile single-container editing ergonomics with whole-document selection across modular blocks, the system enforces a two-tier hierarchical selection protocol:
+1. **Tier 1 — Single-Block Full Selection**:
+   - In `InlineRichEditor.tsx`, `handleKeyDown` captures `(e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')`.
+   - If the block is non-empty and the current DOM selection does not yet encompass the entire block (from character offset `0` to `currentContent.length`), the default action is prevented and a DOM `Range` spanning all child nodes of the container (`range.selectNodeContents(container)`) is constructed and applied to `window.getSelection()`.
+   - In `<textarea>` components (`BlockRenderer.tsx` code blocks and `EditorHeader.tsx` document title) and `<input>` caption controls, if `selectionStart !== 0 || selectionEnd !== value.length`, the element is selected in full via `el.select()`.
+2. **Tier 2 — Whole-Document Selection Escalation**:
+   - When `Ctrl+A` is actuated and the active element is already fully selected (or is empty, length 0):
+     - The event invokes `onSelectAllPage()`.
+     - `App.tsx`'s `handleSelectAllPage` constructs an encompassing `MultiBlockSelection` spanning from block 0 (offset 0) to block $N-1$ (offset `lastBlock.content.length`).
+     - Native DOM selections and input focus states are cleared (`removeAllRanges()`, `blur()`) to eliminate competing visual carets.
+     - `computeMultiBlockSelectionRects` calculates the highlight bounds across all document blocks, projecting them onto the `SelectionOverlay` SVG layer.
+   - In `App.tsx`'s capture-phase keyboard listener (`handleKeyDownCapture`), pressing `Ctrl+A` while any `MultiBlockSelection` is already active directly promotes the selection to encompass the entire document.
+3. **Execution Parity**:
+   - Once all blocks are selected, existing multi-block clipboard actions (`Ctrl+C`, `Ctrl+X`), deletions (`Backspace`, `Delete`), and replacement typing operate seamlessly across the entire document canvas.
 
 ---
 

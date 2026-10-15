@@ -229,6 +229,7 @@ interface InlineRichEditorProps {
     focusOffset: number,
     clientX?: number
   ) => void;
+  onSelectAllPage?: () => void;
 }
 
 export const InlineRichEditor: React.FC<InlineRichEditorProps> = ({
@@ -242,6 +243,7 @@ export const InlineRichEditor: React.FC<InlineRichEditorProps> = ({
   onFocusHandled,
   onNavigateCursor,
   onShiftBoundary,
+  onSelectAllPage,
   onUpdate,
   onInsertBelow,
   onMergeWithPrevious,
@@ -281,7 +283,7 @@ export const InlineRichEditor: React.FC<InlineRichEditorProps> = ({
           if (seg.customLabel) badge.setAttribute('data-custom-label', seg.customLabel);
 
           badge.className =
-            'page-link-badge inline-flex items-center gap-1.5 px-2 py-0.5 mx-1 my-0.5 rounded-lg border text-xs font-medium cursor-pointer hover:border-[var(--theme-accent)] transition-all shadow-2xs align-middle group/link selection:bg-[var(--theme-accent)] selection:text-[var(--theme-accent-text)]';
+            'page-link-badge inline-flex items-center gap-1.5 px-2 py-0.5 mx-1 my-0.5 rounded-lg border text-xs font-medium cursor-pointer hover:border-[var(--theme-accent)] transition-all shadow-2xs align-middle group/link';
           badge.style.backgroundColor = 'var(--theme-bg-surface)';
           badge.style.borderColor = 'var(--theme-border)';
           badge.style.color = 'var(--theme-text-main)';
@@ -507,6 +509,41 @@ export const InlineRichEditor: React.FC<InlineRichEditorProps> = ({
     const isCollapsed = selection ? selection.isCollapsed : true;
     const isAtStart = isCollapsed && offset === 0;
     const isAtEnd = isCollapsed && offset === currentContent.length;
+
+    // Hierarchical Ctrl+A / Cmd+A selection: 1st selects block, 2nd selects all page
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A') && !e.shiftKey && !e.altKey) {
+      const sel = window.getSelection();
+      let isFullySelected = false;
+      if (currentContent.length === 0) {
+        isFullySelected = true;
+      } else if (sel && sel.rangeCount > 0) {
+        const anchorCharOffset = sel.anchorNode
+          ? getCharOffsetFromDomPoint(container, sel.anchorNode, sel.anchorOffset)
+          : 0;
+        const focusCharOffset = sel.focusNode
+          ? getCharOffsetFromDomPoint(container, sel.focusNode, sel.focusOffset)
+          : 0;
+        const startChar = Math.min(anchorCharOffset, focusCharOffset);
+        const endChar = Math.max(anchorCharOffset, focusCharOffset);
+        if (startChar === 0 && endChar >= currentContent.length && !sel.isCollapsed) {
+          isFullySelected = true;
+        }
+      }
+
+      if (isFullySelected) {
+        e.preventDefault();
+        onSelectAllPage?.();
+      } else {
+        e.preventDefault();
+        if (sel) {
+          const range = document.createRange();
+          range.selectNodeContents(container);
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+      }
+      return;
+    }
 
     if ((e.key === 'Delete' || e.key === 'Del') && e.altKey) {
       e.preventDefault();

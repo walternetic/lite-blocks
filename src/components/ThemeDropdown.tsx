@@ -42,9 +42,9 @@ export const ThemeDropdown: React.FC<ThemeDropdownProps> = ({
         aria-expanded={isOpen}
         style={{ color: 'var(--theme-text-muted)' }}
         className="p-1.5 rounded-md hover:text-[var(--theme-text-main)] hover:bg-black/5 dark:hover:bg-white/5 transition-colors relative"
-        title="Temi & Aspetto"
+        title={`Temi & Aspetto (${isDarkMode ? 'Scuro' : 'Chiaro'})`}
       >
-        {isDarkMode ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
+        {isDarkMode ? <Moon className="w-3.5 h-3.5" /> : <Sun className="w-3.5 h-3.5" />}
       </button>
 
       {/* Popover Dropdown */}
@@ -79,93 +79,37 @@ export const ThemeDropdown: React.FC<ThemeDropdownProps> = ({
                 color: 'var(--theme-text-main)',
                 borderColor: 'var(--theme-border)',
               }}
-              className="flex items-center gap-1 px-2 py-1 rounded-md border text-[11px] font-medium hover:opacity-90 transition-opacity"
-              title="Commuta modalità chiaro / scuro"
+              className="flex items-center gap-1.5 px-2 py-1 rounded-md border text-[11px] font-medium hover:opacity-90 transition-opacity"
+              title={isDarkMode ? "Modalità scura attiva (clicca per passare a chiaro)" : "Modalità chiara attiva (clicca per passare a scuro)"}
             >
               {isDarkMode ? (
                 <>
-                  <Sun className="w-3 h-3 text-amber-500" />
-                  <span>Chiaro</span>
+                  <Moon className="w-3 h-3 text-indigo-400" />
+                  <span>Scuro</span>
                 </>
               ) : (
                 <>
-                  <Moon className="w-3 h-3 text-indigo-400" />
-                  <span>Scuro</span>
+                  <Sun className="w-3 h-3 text-amber-500" />
+                  <span>Chiaro</span>
                 </>
               )}
             </button>
           </div>
 
-          {/* Theme Palette List */}
+          {/* Theme Palette List (filtered exclusively by current mode) */}
           <div className="max-h-72 overflow-y-auto space-y-2.5 pr-0.5">
-            {/* Dark Themes Group */}
             <div>
               <div
                 style={{ color: 'var(--theme-text-muted)' }}
                 className="px-1 mb-1 text-[10px] font-semibold uppercase tracking-wider flex items-center justify-between"
               >
-                <span>Temi Scuri</span>
-                <span className="font-mono text-[9px]">{darkThemes.length}</span>
+                <span>{isDarkMode ? 'Temi Scuri' : 'Temi Chiari'}</span>
+                <span className="font-mono text-[9px]">
+                  {isDarkMode ? darkThemes.length : lightThemes.length}
+                </span>
               </div>
               <div className="space-y-0.5">
-                {darkThemes.map((theme) => {
-                  const isSelected = currentTheme.id === theme.id;
-                  return (
-                    <button
-                      key={theme.id}
-                      type="button"
-                      onClick={() => {
-                        onSelectTheme(theme.id);
-                      }}
-                      style={
-                        isSelected
-                          ? {
-                              backgroundColor: 'var(--theme-bg-hover)',
-                              color: 'var(--theme-text-main)',
-                            }
-                          : {
-                              color: 'var(--theme-text-muted)',
-                            }
-                      }
-                      className="w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-xs transition-colors hover:text-[var(--theme-text-main)] hover:bg-black/5 dark:hover:bg-white/5 text-left group"
-                    >
-                      <div className="flex items-center gap-2 min-w-0">
-                        {/* 2-tone swatch badge */}
-                        <div
-                          className="w-4 h-4 rounded-full border border-black/15 dark:border-white/20 flex items-center justify-center shrink-0 shadow-xs"
-                          style={{ backgroundColor: theme.colors.bgSidebar }}
-                        >
-                          <span
-                            className="w-1.5 h-1.5 rounded-full"
-                            style={{ backgroundColor: theme.colors.accent }}
-                          />
-                        </div>
-                        <span className="truncate font-medium">{theme.name}</span>
-                      </div>
-
-                      {isSelected && (
-                        <Check
-                          className="w-3.5 h-3.5 shrink-0"
-                          style={{ color: 'var(--theme-accent)' }}
-                        />
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Light Themes Group */}
-            <div>
-              <div
-                style={{ color: 'var(--theme-text-muted)' }}
-                className="px-1 mb-1 text-[10px] font-semibold uppercase tracking-wider flex items-center justify-between"
-              >
-                <span>Temi Chiari</span>
-                <span className="font-mono text-[9px]">{lightThemes.length}</span>
-              </div>
-              <div className="space-y-0.5">
-                {lightThemes.map((theme) => {
+                {(isDarkMode ? darkThemes : lightThemes).map((theme) => {
                   const isSelected = currentTheme.id === theme.id;
                   return (
                     <button

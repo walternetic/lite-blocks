@@ -20,7 +20,7 @@ export const SelectionOverlay: React.FC<SelectionOverlayProps> = ({ rects }) => 
           width={r.width}
           height={r.height}
           fill="var(--theme-accent, #2383e2)"
-          fillOpacity={0.25}
+          fillOpacity={0.28}
           rx={2}
         />
       ))}

@@ -197,6 +197,8 @@ export default function App() {
   const activeWsMeta = workspaces.find((w) => w.id === activeWorkspaceId);
   const currentTheme = getThemeById(activeWsMeta?.themeId || (isDarkMode ? 'tokyo-night' : DEFAULT_THEME_ID));
   const activeWsDefaultContentWidth = activeWsMeta?.defaultContentWidth || FALLBACK_DEFAULT_WIDTH;
+  const lastLightThemeRef = useRef<string>(currentTheme.mode === 'light' ? currentTheme.id : 'bright-minimal');
+  const lastDarkThemeRef = useRef<string>(currentTheme.mode === 'dark' ? currentTheme.id : 'tokyo-night');
 
   const handleSetWorkspaceDefaultContentWidth = (width: ConcreteContentWidth) => {
     setWorkspaces((prev) => {
@@ -212,6 +214,12 @@ export default function App() {
 
   // Apply active theme variables and dark mode class to html element
   useEffect(() => {
+    if (currentTheme.mode === 'dark') {
+      lastDarkThemeRef.current = currentTheme.id;
+    } else {
+      lastLightThemeRef.current = currentTheme.id;
+    }
+
     const isDark = currentTheme.mode === 'dark';
     if (isDark) {
       document.documentElement.classList.add('dark');
@@ -838,6 +846,33 @@ export default function App() {
     }
   };
 
+  const handleSelectAllPage = useCallback(() => {
+    if (!activeNote || activeNote.blocks.length === 0) return;
+    const firstBlock = activeNote.blocks[0];
+    const lastBlock = activeNote.blocks[activeNote.blocks.length - 1];
+    const newSelection: MultiBlockSelection = {
+      anchor: {
+        blockId: firstBlock.id,
+        blockIndex: 0,
+        offset: 0,
+      },
+      focus: {
+        blockId: lastBlock.id,
+        blockIndex: activeNote.blocks.length - 1,
+        offset: lastBlock.content?.length || 0,
+      },
+    };
+    window.getSelection()?.removeAllRanges();
+    (document.activeElement as HTMLElement)?.blur?.();
+    multiBlockSelectionRef.current = newSelection;
+    setMultiBlockSelection(newSelection);
+    if (canvasScrollRef.current) {
+      setSelectionRects(
+        computeMultiBlockSelectionRects(canvasScrollRef.current, activeNote.blocks, newSelection)
+      );
+    }
+  }, [activeNote]);
+
   // Canvas Mouse Down: Detect start of potential drag selection
   const handleCanvasMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
@@ -1069,6 +1104,14 @@ export default function App() {
     if (!multiBlockSelection || !activeNote) return;
 
     const handleKeyDownCapture = (e: KeyboardEvent) => {
+      // 0. Select All Page (Ctrl+A / Cmd+A) when multi-block selection is already active
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A') && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        handleSelectAllPage();
+        return;
+      }
+
       // 1. Copy (Ctrl+C / Cmd+C)
       if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C')) {
         e.preventDefault();
@@ -1255,7 +1298,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDownCapture, true);
     return () => window.removeEventListener('keydown', handleKeyDownCapture, true);
-  }, [multiBlockSelection, activeNote]);
+  }, [multiBlockSelection, activeNote, handleSelectAllPage]);
 
   const handleMoveBlockUp = (index: number) => {
     if (!activeNote || index === 0) return;
@@ -1634,7 +1677,10 @@ export default function App() {
   };
 
   const handleToggleDarkMode = () => {
-    const targetThemeId = currentTheme.mode === 'dark' ? 'notion-minimal' : 'tokyo-night';
+    const targetThemeId =
+      currentTheme.mode === 'dark'
+        ? lastLightThemeRef.current || 'bright-minimal'
+        : lastDarkThemeRef.current || 'tokyo-night';
     handleApplyTheme(targetThemeId);
   };
 
@@ -1644,7 +1690,7 @@ export default function App() {
         backgroundColor: 'var(--theme-bg-app)',
         color: 'var(--theme-text-main)',
       }}
-      className="flex h-screen w-screen overflow-hidden selection:bg-neutral-200 dark:selection:bg-neutral-700"
+      className="flex h-screen w-screen overflow-hidden"
     >
       {/* Sidebar Navigation */}
       <Sidebar
@@ -1723,6 +1769,7 @@ export default function App() {
                 focusedBlockTarget={focusedBlockTarget}
                 onFocusHandled={() => setFocusedBlockTarget(null)}
                 onNavigateCursor={handleNavigateCursor}
+                onSelectAllPage={handleSelectAllPage}
                 onUpdateNote={handleUpdateNote}
               />
 
@@ -1756,6 +1803,7 @@ export default function App() {
                     onFocusHandled={() => setFocusedBlockTarget(null)}
                     onNavigateCursor={handleNavigateCursor}
                     onShiftBoundary={handleShiftBoundary}
+                    onSelectAllPage={handleSelectAllPage}
                     onUpdate={handleUpdateBlock}
                     onDelete={handleDeleteBlock}
                     onInsertBelow={handleInsertBlockBelow}

@@ -27,9 +27,9 @@ export interface ThemeDefinition {
 
 export const THEMES: ThemeDefinition[] = [
   {
-    id: 'notion-minimal',
-    name: 'Notion Minimal',
-    description: 'Clean monochrome paper style',
+    id: 'bright-minimal',
+    name: 'Bright Minimal',
+    description: 'Clean bright monochrome style',
     mode: 'light',
     preview: {
       bg: '#ffffff',
@@ -418,11 +418,12 @@ export const THEMES: ThemeDefinition[] = [
   },
 ];
 
-export const DEFAULT_THEME_ID = 'notion-minimal';
+export const DEFAULT_THEME_ID = 'bright-minimal';
 
 export function getThemeById(themeId?: string): ThemeDefinition {
   if (!themeId) return THEMES[0];
-  const found = THEMES.find((t) => t.id === themeId);
+  const normalizedId = themeId === 'notion-minimal' ? 'bright-minimal' : themeId;
+  const found = THEMES.find((t) => t.id === normalizedId);
   return found || THEMES[0];
 }
 

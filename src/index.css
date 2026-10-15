@@ -12,6 +12,7 @@
     --theme-accent: #2383e2;
     --theme-accent-hover: #1d6dc0;
     --theme-accent-text: #ffffff;
+    --theme-selection-bg: color-mix(in srgb, var(--theme-accent) 28%, transparent);
     --theme-code-bg: #f1f1ef;
     --theme-callout-bg: #f7f6f3;
   }
@@ -65,14 +66,14 @@
 
 /* Document and page link component selection highlighting */
 ::selection {
-  background-color: var(--theme-accent);
-  color: var(--theme-accent-text);
+  background-color: var(--theme-selection-bg);
+  color: inherit;
 }
 
 .page-link-badge::selection,
 .page-link-badge *::selection {
-  background-color: var(--theme-accent) !important;
-  color: var(--theme-accent-text) !important;
+  background-color: var(--theme-selection-bg) !important;
+  color: inherit !important;
 }
 
 

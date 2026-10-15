@@ -80,6 +80,7 @@ interface BlockRendererProps {
   onOpenLightbox: (src: string, caption?: string) => void;
   onReorderBlocks: (sourceIndex: number, targetIndex: number, position: 'top' | 'bottom') => void;
   onNavigateCrossWorkspace?: (workspaceName: string, noteTitle?: string) => void;
+  onSelectAllPage?: () => void;
 }
 
 const LANGUAGES = [
@@ -104,6 +105,7 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
   onFocusHandled,
   onNavigateCursor,
   onShiftBoundary,
+  onSelectAllPage,
   onUpdate,
   onDelete,
   onInsertBelow,
@@ -548,6 +550,23 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (showSlashMenu) return; // handled by slash menu
 
+    // Hierarchical Ctrl+A / Cmd+A selection
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A') && !e.shiftKey && !e.altKey) {
+      const textarea = textareaRef.current;
+      if (textarea) {
+        const val = textarea.value;
+        if (val.length === 0 || (textarea.selectionStart === 0 && textarea.selectionEnd === val.length)) {
+          e.preventDefault();
+          onSelectAllPage?.();
+          return;
+        } else {
+          e.preventDefault();
+          textarea.select();
+          return;
+        }
+      }
+    }
+
     if ((e.key === 'Delete' || e.key === 'Del') && e.altKey) {
       e.preventDefault();
       onDelete(block.id);
@@ -937,6 +956,7 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
             onFocusHandled={onFocusHandled}
             onNavigateCursor={onNavigateCursor}
             onShiftBoundary={onShiftBoundary}
+            onSelectAllPage={onSelectAllPage}
             onUpdate={onUpdate}
             onDelete={onDelete}
             onInsertBelow={onInsertBelow}
@@ -999,6 +1019,7 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
               onFocusHandled={onFocusHandled}
               onNavigateCursor={onNavigateCursor}
               onShiftBoundary={onShiftBoundary}
+              onSelectAllPage={onSelectAllPage}
               onUpdate={onUpdate}
               onDelete={onDelete}
               onInsertBelow={onInsertBelow}
@@ -1115,7 +1136,18 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
                       onUpdate({ ...block, caption: e.target.value })
                     }
                     onKeyDown={(e) => {
-                      if ((e.key === 'Delete' || e.key === 'Del') && e.altKey) {
+                      if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A') && !e.shiftKey && !e.altKey) {
+                        const input = e.currentTarget;
+                        if (input.value.length === 0 || (input.selectionStart === 0 && input.selectionEnd === input.value.length)) {
+                          e.preventDefault();
+                          onSelectAllPage?.();
+                          return;
+                        } else {
+                          e.preventDefault();
+                          input.select();
+                          return;
+                        }
+                      } else if ((e.key === 'Delete' || e.key === 'Del') && e.altKey) {
                         e.preventDefault();
                         onDelete(block.id);
                       } else if (
@@ -1322,6 +1354,7 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
               onFocusHandled={onFocusHandled}
               onNavigateCursor={onNavigateCursor}
               onShiftBoundary={onShiftBoundary}
+              onSelectAllPage={onSelectAllPage}
               onUpdate={onUpdate}
               onDelete={onDelete}
               onInsertBelow={onInsertBelow}
@@ -1355,6 +1388,7 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
               onFocusHandled={onFocusHandled}
               onNavigateCursor={onNavigateCursor}
               onShiftBoundary={onShiftBoundary}
+              onSelectAllPage={onSelectAllPage}
               onUpdate={onUpdate}
               onDelete={onDelete}
               onInsertBelow={onInsertBelow}
