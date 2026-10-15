@@ -352,3 +352,44 @@ export function handleBlockCopy(
     setLocalClipboard({ text: plain, html });
   }
 }
+
+/**
+ * Write dual-MIME content (text/plain + text/html) to system clipboard and local clipboard.
+ * Supports both ClipboardEvent (synchronous setData) and standalone invocation (navigator.clipboard).
+ */
+export async function writeMultiMimeToClipboard(
+  plainText: string,
+  e?: React.ClipboardEvent | ClipboardEvent
+): Promise<void> {
+  const { plain, html } = buildMultiMimeClipboard(plainText);
+  setLocalClipboard({ text: plain, html });
+
+  if (e && 'clipboardData' in e && e.clipboardData) {
+    e.preventDefault();
+    e.clipboardData.setData('text/plain', plain);
+    e.clipboardData.setData('text/html', html);
+    return;
+  }
+
+  if (typeof navigator !== 'undefined' && navigator.clipboard) {
+    try {
+      if (typeof ClipboardItem !== 'undefined') {
+        const item = new ClipboardItem({
+          'text/plain': new Blob([plain], { type: 'text/plain' }),
+          'text/html': new Blob([html], { type: 'text/html' }),
+        });
+        await navigator.clipboard.write([item]);
+        return;
+      }
+    } catch {
+      // Fallback if ClipboardItem construction is restricted
+    }
+
+    try {
+      await navigator.clipboard.writeText(plain);
+    } catch (err) {
+      console.warn('Could not write to navigator.clipboard:', err);
+    }
+  }
+}
+

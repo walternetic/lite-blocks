@@ -2,7 +2,19 @@ import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { NoteBlock, BlockType } from '../types/note';
 import { resolveCrossWorkspaceLink } from '../lib/workspaceStorage';
 import { PageLinkModal } from './PageLinkModal';
-import { handleBlockCopy, parseClipboardPaste, isShiftPasteActive } from '../lib/clipboard';
+import {
+  handleBlockCopy,
+  parseClipboardPaste,
+  isShiftPasteActive,
+  writeMultiMimeToClipboard,
+} from '../lib/clipboard';
+import {
+  getContentEditableCaretPoint,
+  isContentEditableOnFirstLine,
+  isContentEditableOnLastLine,
+  setContentEditableCaretAtClientX,
+} from '../lib/caretCoordinates';
+import { getCharOffsetFromDomPoint } from '../lib/crossBlockSelection';
 
 export interface LinkSegment {
   type: 'link';
@@ -182,7 +194,18 @@ interface InlineRichEditorProps {
   placeholder?: string;
   autoFocus?: boolean;
   focusPosition?: 'start' | 'end' | number;
+  focusTarget?: {
+    id: string;
+    cursorPosition?: 'start' | 'end' | number;
+    targetClientX?: number;
+    targetLine?: 'first' | 'last';
+  } | null;
   onFocusHandled?: () => void;
+  onNavigateCursor?: (
+    direction: 'up' | 'down',
+    fromIndex: number,
+    currentClientX: number
+  ) => void;
   onUpdate: (updatedBlock: NoteBlock) => void;
   onInsertBelow: (
     type: BlockType,
@@ -193,11 +216,19 @@ interface InlineRichEditorProps {
   ) => void;
   onMergeWithPrevious: (index: number) => void;
   onMergeWithNext: (index: number) => void;
+  onDelete?: (blockId: string) => void;
   index: number;
   totalBlocks: number;
   showSlashMenu?: boolean;
   onSlashTrigger?: (val: string) => void;
   dataBlockId?: string;
+  onShiftBoundary?: (
+    direction: 'up' | 'down' | 'left' | 'right',
+    fromIndex: number,
+    anchorOffset: number,
+    focusOffset: number,
+    clientX?: number
+  ) => void;
 }
 
 export const InlineRichEditor: React.FC<InlineRichEditorProps> = ({
@@ -207,11 +238,15 @@ export const InlineRichEditor: React.FC<InlineRichEditorProps> = ({
   placeholder,
   autoFocus,
   focusPosition,
+  focusTarget,
   onFocusHandled,
+  onNavigateCursor,
+  onShiftBoundary,
   onUpdate,
   onInsertBelow,
   onMergeWithPrevious,
   onMergeWithNext,
+  onDelete,
   index,
   totalBlocks,
   showSlashMenu,
@@ -332,17 +367,25 @@ export const InlineRichEditor: React.FC<InlineRichEditorProps> = ({
   useEffect(() => {
     if (autoFocus && containerRef.current) {
       containerRef.current.focus();
-      const currentContent = block.content || '';
-      const target =
-        focusPosition === 'end'
-          ? currentContent.length
-          : typeof focusPosition === 'number'
-          ? focusPosition
-          : 0;
-      setCaretCharacterOffset(containerRef.current, target);
+      if (focusTarget?.targetClientX !== undefined && focusTarget?.targetLine) {
+        setContentEditableCaretAtClientX(
+          containerRef.current,
+          focusTarget.targetClientX,
+          focusTarget.targetLine
+        );
+      } else {
+        const currentContent = block.content || '';
+        const target =
+          focusPosition === 'end'
+            ? currentContent.length
+            : typeof focusPosition === 'number'
+            ? focusPosition
+            : 0;
+        setCaretCharacterOffset(containerRef.current, target);
+      }
       onFocusHandled?.();
     }
-  }, [autoFocus, focusPosition, onFocusHandled, block.content]);
+  }, [autoFocus, focusPosition, focusTarget, onFocusHandled, block.content]);
 
   // Input event when typing
   const handleInput = (e: React.FormEvent<HTMLDivElement>) => {
@@ -384,8 +427,55 @@ export const InlineRichEditor: React.FC<InlineRichEditorProps> = ({
     handleBlockCopy(e);
   };
 
+  const cutSelection = (): boolean => {
+    const container = containerRef.current;
+    if (!container) return false;
+
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return false;
+
+    const range = sel.getRangeAt(0);
+    if (!container.contains(range.commonAncestorContainer)) return false;
+
+    const frag = range.cloneContents();
+    let plain = '';
+    for (const node of Array.from(frag.childNodes)) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        plain += node.textContent || '';
+      } else if (node.nodeType === Node.ELEMENT_NODE) {
+        const el = node as HTMLElement;
+        const raw = el.getAttribute('data-link-raw') || el.getAttribute('data-raw');
+        if (raw) {
+          plain += raw;
+        } else if (el.nodeName === 'BR') {
+          plain += '\n';
+        } else {
+          plain += el.textContent || '';
+        }
+      }
+    }
+
+    if (!plain) return false;
+
+    writeMultiMimeToClipboard(plain);
+
+    const offset = getCaretCharacterOffset(container);
+    range.deleteContents();
+
+    const updated = serializeDomContent(container);
+    lastSyncedContentRef.current = updated;
+    onUpdate({ ...block, content: updated });
+    renderDom(container, updated);
+    setCaretCharacterOffset(container, offset);
+
+    return true;
+  };
+
   const handleCut = (e: React.ClipboardEvent<HTMLDivElement>) => {
-    handleBlockCopy(e);
+    const didCut = cutSelection();
+    if (didCut) {
+      e.preventDefault();
+    }
   };
 
   const handlePaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
@@ -417,6 +507,92 @@ export const InlineRichEditor: React.FC<InlineRichEditorProps> = ({
     const isCollapsed = selection ? selection.isCollapsed : true;
     const isAtStart = isCollapsed && offset === 0;
     const isAtEnd = isCollapsed && offset === currentContent.length;
+
+    if ((e.key === 'Delete' || e.key === 'Del') && e.altKey) {
+      e.preventDefault();
+      if (onDelete) {
+        onDelete(block.id);
+      }
+      return;
+    }
+
+    // WM_CUT: Shift+Delete on selected text
+    if (
+      (e.key === 'Delete' || e.key === 'Del') &&
+      e.shiftKey &&
+      !e.altKey &&
+      !e.ctrlKey &&
+      !e.metaKey
+    ) {
+      const didCut = cutSelection();
+      if (didCut) {
+        e.preventDefault();
+        return;
+      }
+    }
+
+    // Cross-block Shift+Arrow selection expansion
+    if (e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      const sel = window.getSelection();
+      const anchorOffset =
+        sel && sel.anchorNode
+          ? getCharOffsetFromDomPoint(container, sel.anchorNode, sel.anchorOffset)
+          : offset;
+      const focusOffset =
+        sel && sel.focusNode
+          ? getCharOffsetFromDomPoint(container, sel.focusNode, sel.focusOffset)
+          : offset;
+
+      if (e.key === 'ArrowUp') {
+        if (isContentEditableOnFirstLine(container) && index > 0) {
+          e.preventDefault();
+          const pt = getContentEditableCaretPoint(container);
+          const clientX = pt ? pt.clientX : container.getBoundingClientRect().left;
+          onShiftBoundary?.('up', index, anchorOffset, focusOffset, clientX);
+          return;
+        }
+      } else if (e.key === 'ArrowDown') {
+        if (isContentEditableOnLastLine(container) && index < totalBlocks - 1) {
+          e.preventDefault();
+          const pt = getContentEditableCaretPoint(container);
+          const clientX = pt ? pt.clientX : container.getBoundingClientRect().left;
+          onShiftBoundary?.('down', index, anchorOffset, focusOffset, clientX);
+          return;
+        }
+      } else if (e.key === 'ArrowLeft') {
+        if (focusOffset === 0 && index > 0) {
+          e.preventDefault();
+          onShiftBoundary?.('left', index, anchorOffset, 0);
+          return;
+        }
+      } else if (e.key === 'ArrowRight') {
+        if (focusOffset >= currentContent.length && index < totalBlocks - 1) {
+          e.preventDefault();
+          onShiftBoundary?.('right', index, anchorOffset, currentContent.length);
+          return;
+        }
+      }
+    }
+
+    if (e.key === 'ArrowUp' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && isCollapsed) {
+      if (isContentEditableOnFirstLine(container)) {
+        e.preventDefault();
+        const pt = getContentEditableCaretPoint(container);
+        const clientX = pt ? pt.clientX : container.getBoundingClientRect().left;
+        onNavigateCursor?.('up', index, clientX);
+        return;
+      }
+    }
+
+    if (e.key === 'ArrowDown' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && isCollapsed) {
+      if (isContentEditableOnLastLine(container)) {
+        e.preventDefault();
+        const pt = getContentEditableCaretPoint(container);
+        const clientX = pt ? pt.clientX : container.getBoundingClientRect().left;
+        onNavigateCursor?.('down', index, clientX);
+        return;
+      }
+    }
 
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -493,6 +669,12 @@ export const InlineRichEditor: React.FC<InlineRichEditorProps> = ({
         <div
           ref={containerRef}
           data-block-id={dataBlockId || block.id}
+          role="textbox"
+          aria-multiline="true"
+          aria-label={placeholder || block.type}
+          aria-placeholder={placeholder}
+          spellCheck={true}
+          inputMode="text"
           contentEditable
           suppressContentEditableWarning
           onInput={handleInput}

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
 import { NoteBlock, BlockType } from '../types/note';
 import { SlashCommandMenu } from './SlashCommandMenu';
 import { InlineRichEditor } from './InlineRichEditor';
@@ -11,6 +11,7 @@ import {
   useLocalClipboard,
   getLocalClipboard,
   setLocalClipboard,
+  writeMultiMimeToClipboard,
 } from '../lib/clipboard';
 import {
   Plus,
@@ -30,6 +31,12 @@ import {
   ChevronRight,
   ClipboardPaste,
 } from 'lucide-react';
+import {
+  getTextareaCaretCoordinates,
+  isTextareaOnFirstLine,
+  isTextareaOnLastLine,
+  findClosestTextareaIndexForClientX,
+} from '../lib/caretCoordinates';
 
 interface BlockRendererProps {
   block: NoteBlock;
@@ -37,7 +44,25 @@ interface BlockRendererProps {
   totalBlocks: number;
   autoFocus?: boolean;
   focusPosition?: 'start' | 'end' | number;
+  focusTarget?: {
+    id: string;
+    cursorPosition?: 'start' | 'end' | number;
+    targetClientX?: number;
+    targetLine?: 'first' | 'last';
+  } | null;
   onFocusHandled?: () => void;
+  onNavigateCursor?: (
+    direction: 'up' | 'down',
+    fromIndex: number,
+    currentClientX: number
+  ) => void;
+  onShiftBoundary?: (
+    direction: 'up' | 'down' | 'left' | 'right',
+    fromIndex: number,
+    anchorOffset: number,
+    focusOffset: number,
+    clientX?: number
+  ) => void;
   onUpdate: (updatedBlock: NoteBlock) => void;
   onDelete: (blockId: string) => void;
   onInsertBelow: (
@@ -75,7 +100,10 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
   totalBlocks,
   autoFocus,
   focusPosition,
+  focusTarget,
   onFocusHandled,
+  onNavigateCursor,
+  onShiftBoundary,
   onUpdate,
   onDelete,
   onInsertBelow,
@@ -112,7 +140,57 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
   const imageInputRef = useRef<HTMLInputElement>(null);
   const prevContentRef = useRef<string>(block.content || '');
   const optionsContainerRef = useRef<HTMLDivElement>(null);
+  const optionsMenuRef = useRef<HTMLDivElement>(null);
+  const subMenuContainerRef = useRef<HTMLDivElement>(null);
+  const subMenuRef = useRef<HTMLDivElement>(null);
   const subMenuTimeoutRef = useRef<number | null>(null);
+
+  const [menuPlacement, setMenuPlacement] = useState<{
+    vertical: 'down' | 'up';
+  }>({ vertical: 'down' });
+
+  const [subMenuPlacement, setSubMenuPlacement] = useState<{
+    horizontal: 'right' | 'left';
+    vertical: 'down' | 'up';
+  }>({ horizontal: 'right', vertical: 'down' });
+
+  // Dynamically position main options menu to avoid viewport overflow
+  useEffect(() => {
+    if (!showOptionsMenu || !optionsContainerRef.current) return;
+    const updateMenuPlacement = () => {
+      if (!optionsContainerRef.current) return;
+      const rect = optionsContainerRef.current.getBoundingClientRect();
+      const spaceBelow = window.innerHeight - rect.bottom - 8;
+      const spaceAbove = rect.top - 8;
+      setMenuPlacement({
+        vertical: spaceBelow < 280 && spaceAbove > spaceBelow ? 'up' : 'down',
+      });
+    };
+    updateMenuPlacement();
+    window.addEventListener('resize', updateMenuPlacement);
+    return () => window.removeEventListener('resize', updateMenuPlacement);
+  }, [showOptionsMenu]);
+
+  // Dynamically position flyout submenu to avoid viewport overflow
+  useEffect(() => {
+    if (!showSubMenu || !subMenuContainerRef.current) return;
+    const updateSubMenuPlacement = () => {
+      if (!subMenuContainerRef.current) return;
+      const rect = subMenuContainerRef.current.getBoundingClientRect();
+      const spaceRight = window.innerWidth - rect.right - 8;
+      const spaceLeft = rect.left - 8;
+      const spaceBelow = window.innerHeight - rect.top - 8;
+      const spaceAbove = rect.bottom - 8;
+
+      setSubMenuPlacement({
+        horizontal: spaceRight < 240 && spaceLeft > spaceRight ? 'left' : 'right',
+        vertical: spaceBelow < 200 && spaceAbove > spaceBelow ? 'up' : 'down',
+      });
+    };
+    updateSubMenuPlacement();
+    window.addEventListener('resize', updateSubMenuPlacement);
+    return () => window.removeEventListener('resize', updateSubMenuPlacement);
+  }, [showSubMenu]);
 
   // Click outside to dismiss block options menu and submenu
   useEffect(() => {
@@ -158,29 +236,77 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
     prevContentRef.current = block.content || '';
   }, [block.content]);
 
-  // Auto-resize textarea to fit text without scrollbar
-  useEffect(() => {
+  // Auto-resize textarea to fit text without internal scrollbar
+  const adjustTextareaHeight = useCallback(() => {
     if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-      textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
+      const el = textareaRef.current;
+      el.style.height = 'auto';
+      el.style.height = `${el.scrollHeight}px`;
+      el.scrollTop = 0;
     }
-  }, [block.content]);
+  }, []);
 
-  // Auto-focus management when requested (e.g. on Enter key block creation or Backspace delete)
+  useLayoutEffect(() => {
+    adjustTextareaHeight();
+  }, [block.content, block.type, adjustTextareaHeight]);
+
+  useEffect(() => {
+    window.addEventListener('resize', adjustTextareaHeight);
+    return () => window.removeEventListener('resize', adjustTextareaHeight);
+  }, [adjustTextareaHeight]);
+
+  // Track element width via ResizeObserver to trigger height adjustment whenever width changes
+  // (e.g. contentWidth setting toggle, sidebar collapse/expand, window resize).
+  const lastWidthRef = useRef<number>(0);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+
+    lastWidthRef.current = Math.round(el.getBoundingClientRect().width);
+
+    let rafId: number | null = null;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const newWidth = Math.round(entry.contentRect.width);
+        if (newWidth > 0 && Math.abs(newWidth - lastWidthRef.current) >= 1) {
+          lastWidthRef.current = newWidth;
+          if (rafId) cancelAnimationFrame(rafId);
+          rafId = requestAnimationFrame(() => {
+            adjustTextareaHeight();
+          });
+        }
+      }
+    });
+
+    observer.observe(el);
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId);
+      observer.disconnect();
+    };
+  }, [adjustTextareaHeight]);
+
+  // Auto-focus management when requested (e.g. on Enter key block creation or cursor navigation)
   useEffect(() => {
     if (autoFocus && textareaRef.current) {
       const el = textareaRef.current;
       el.focus();
-      const pos =
-        focusPosition === 'end'
-          ? el.value.length
-          : typeof focusPosition === 'number'
-          ? focusPosition
-          : 0;
+      let pos = 0;
+      if (focusTarget?.targetClientX !== undefined && focusTarget?.targetLine) {
+        pos = findClosestTextareaIndexForClientX(
+          el,
+          focusTarget.targetClientX,
+          focusTarget.targetLine
+        );
+      } else if (focusPosition === 'end') {
+        pos = el.value.length;
+      } else if (typeof focusPosition === 'number') {
+        pos = focusPosition;
+      }
       el.setSelectionRange(pos, pos);
       onFocusHandled?.();
     }
-  }, [autoFocus, focusPosition, onFocusHandled]);
+  }, [autoFocus, focusPosition, focusTarget, onFocusHandled]);
 
   const handleDragStart = (e: React.DragEvent) => {
     e.dataTransfer.setData('text/plain', index.toString());
@@ -229,7 +355,12 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
   };
 
   const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const val = e.target.value;
+    const el = e.target;
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight}px`;
+    el.scrollTop = 0;
+
+    const val = el.value;
     const prev = prevContentRef.current;
     prevContentRef.current = val;
 
@@ -274,12 +405,31 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
     }
   };
 
+  const cutTextareaSelection = (textarea: HTMLTextAreaElement): boolean => {
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    if (start === end) return false;
+
+    const current = block.content || '';
+    const selectedText = current.slice(start, end);
+    if (!selectedText) return false;
+
+    writeMultiMimeToClipboard(selectedText);
+    const updated = current.slice(0, start) + current.slice(end);
+    prevContentRef.current = updated;
+    onUpdate({ ...block, content: updated });
+    requestAnimationFrame(() => {
+      textarea.setSelectionRange(start, start);
+    });
+    return true;
+  };
+
   const handleTextareaCut = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const textarea = textareaRef.current;
     if (textarea) {
-      const sel = textarea.value.slice(textarea.selectionStart, textarea.selectionEnd);
-      if (sel) {
-        handleBlockCopy(e, sel);
+      const didCut = cutTextareaSelection(textarea);
+      if (didCut) {
+        e.preventDefault();
       }
     }
   };
@@ -398,6 +548,52 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (showSlashMenu) return; // handled by slash menu
 
+    if ((e.key === 'Delete' || e.key === 'Del') && e.altKey) {
+      e.preventDefault();
+      onDelete(block.id);
+      return;
+    }
+
+    // WM_CUT: Shift+Delete on selected text
+    if (
+      (e.key === 'Delete' || e.key === 'Del') &&
+      e.shiftKey &&
+      !e.altKey &&
+      !e.ctrlKey &&
+      !e.metaKey
+    ) {
+      const textarea = textareaRef.current;
+      if (textarea && textarea.selectionStart !== textarea.selectionEnd) {
+        e.preventDefault();
+        cutTextareaSelection(textarea);
+        return;
+      }
+    }
+
+    if (e.key === 'ArrowUp' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      const textarea = textareaRef.current;
+      if (textarea && textarea.selectionStart === textarea.selectionEnd && onNavigateCursor && isTextareaOnFirstLine(textarea)) {
+        e.preventDefault();
+        const coords = getTextareaCaretCoordinates(textarea, textarea.selectionStart ?? 0);
+        onNavigateCursor('up', index, coords.clientX);
+        return;
+      }
+    }
+
+    if (e.key === 'ArrowDown' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      const textarea = textareaRef.current;
+      if (textarea && textarea.selectionStart === textarea.selectionEnd && onNavigateCursor && isTextareaOnLastLine(textarea)) {
+        e.preventDefault();
+        const coords = getTextareaCaretCoordinates(textarea, textarea.selectionStart ?? 0);
+        onNavigateCursor('down', index, coords.clientX);
+        return;
+      }
+    }
+
+    if (block.type === 'code') {
+      return;
+    }
+
     const textarea = textareaRef.current;
     const currentContent = block.content || '';
     const selStart = textarea ? textarea.selectionStart : currentContent.length;
@@ -489,8 +685,7 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
     return `${(bytes / 1048576).toFixed(1)} MB`;
   };
 
-  // Detect if block contains embedded wikilinks [[workspace/nota]] or [[workspace]]
-  const hasLinks = block.content ? /\[\[(.*?)\]\]/.test(block.content) : false;
+
 
   return (
     <div
@@ -520,7 +715,7 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
       )}
 
       {/* Block Hover Gutter Handle - strictly in the left margin, 0% overlap with content */}
-      <div className="absolute left-1 top-1.5 z-20">
+      <div className={`absolute left-1 top-1.5 ${showOptionsMenu ? 'z-40' : 'z-20'} select-none`}>
         <div ref={optionsContainerRef} className="relative">
           <button
             draggable
@@ -543,7 +738,12 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
           {/* Block Options Dropdown Menu */}
           {showOptionsMenu && (
             <div 
-              className="absolute left-0 top-full pt-1 z-40 w-48 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg shadow-xl py-1 text-xs text-neutral-700 dark:text-neutral-300 animate-in fade-in zoom-in-95 duration-100"
+              ref={optionsMenuRef}
+              className={`absolute left-0 z-40 w-48 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg shadow-xl py-1 text-xs text-neutral-700 dark:text-neutral-300 animate-in fade-in zoom-in-95 duration-100 ${
+                menuPlacement.vertical === 'up'
+                  ? 'bottom-full mb-1 origin-bottom-left'
+                  : 'top-full mt-1 origin-top-left'
+              }`}
               onClick={(e) => e.stopPropagation()}
             >
               <button
@@ -587,6 +787,7 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
 
               {/* Conventional flyout submenu for "Altre.." */}
               <div
+                ref={subMenuContainerRef}
                 className="relative group/submenu"
                 onMouseEnter={handleSubMenuEnter}
                 onMouseLeave={handleSubMenuLeave}
@@ -603,7 +804,16 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
 
                 {showSubMenu && (
                   <div
-                    className="absolute left-full top-0 ml-1 w-56 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg shadow-xl py-1 text-xs text-neutral-700 dark:text-neutral-300 animate-in fade-in zoom-in-95 duration-100 z-50 before:absolute before:-left-3 before:top-0 before:bottom-0 before:w-3 before:content-['']"
+                    ref={subMenuRef}
+                    className={`absolute w-56 bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg shadow-xl py-1 text-xs text-neutral-700 dark:text-neutral-300 animate-in fade-in zoom-in-95 duration-100 z-50 max-h-[calc(100vh-32px)] overflow-y-auto ${
+                      subMenuPlacement.horizontal === 'left'
+                        ? 'right-full mr-1 left-auto before:absolute before:-right-3 before:left-auto before:top-0 before:bottom-0 before:w-3 before:content-[\'\']'
+                        : 'left-full ml-1 right-auto before:absolute before:-left-3 before:top-0 before:bottom-0 before:w-3 before:content-[\'\']'
+                    } ${
+                      subMenuPlacement.vertical === 'up'
+                        ? 'bottom-0 top-auto'
+                        : 'top-0 bottom-auto'
+                    }`}
                     onMouseEnter={handleSubMenuEnter}
                     onMouseLeave={handleSubMenuLeave}
                     onClick={(e) => e.stopPropagation()}
@@ -662,22 +872,24 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
                     >
                       <Trash2 className="w-3.5 h-3.5 opacity-60" /> Pulisci
                     </button>
-
-                    <div className="my-1 border-t border-neutral-100 dark:border-neutral-700" />
-
-                    <button
-                      onClick={() => {
-                        onDelete(block.id);
-                        setShowOptionsMenu(false);
-                        setShowSubMenu(false);
-                      }}
-                      className="w-full flex items-center gap-2 px-3 py-1.5 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 text-left"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" /> Elimina
-                    </button>
                   </div>
                 )}
               </div>
+
+              <div className="my-1 border-t border-neutral-100 dark:border-neutral-700" />
+
+              <button
+                onClick={() => {
+                  onDelete(block.id);
+                  setShowOptionsMenu(false);
+                }}
+                className="w-full flex items-center justify-between px-3 py-1.5 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 text-left transition-colors"
+              >
+                <span className="flex items-center gap-2 font-medium">
+                  <Trash2 className="w-3.5 h-3.5" /> Elimina
+                </span>
+                <span className="text-[10px] text-neutral-400 dark:text-neutral-500 font-mono">Alt+Del</span>
+              </button>
             </div>
           )}
         </div>
@@ -715,75 +927,46 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
           block.type === 'heading1' ||
           block.type === 'heading2' ||
           block.type === 'heading3') && (
-          hasLinks ? (
-            <InlineRichEditor
-              block={block}
-              index={index}
-              totalBlocks={totalBlocks}
-              autoFocus={autoFocus}
-              focusPosition={focusPosition}
-              onFocusHandled={onFocusHandled}
-              onUpdate={onUpdate}
-              onInsertBelow={onInsertBelow}
-              onMergeWithPrevious={onMergeWithPrevious}
-              onMergeWithNext={onMergeWithNext}
-              showSlashMenu={showSlashMenu}
-              onSlashTrigger={(val) => {
-                setShowSlashMenu(true);
-                setSlashQuery(val);
-              }}
-              placeholder={
-                block.type === 'heading1'
-                  ? 'Intestazione 1'
-                  : block.type === 'heading2'
-                  ? 'Intestazione 2'
-                  : block.type === 'heading3'
-                  ? 'Intestazione 3'
-                  : 'Scrivi qualcosa, oppure digita "/" per i blocchi multimediali...'
-              }
-              style={{ color: 'var(--theme-text-main)' }}
-              className={
-                block.type === 'heading1'
-                  ? 'font-display text-2xl font-bold tracking-tight'
-                  : block.type === 'heading2'
-                  ? 'font-display text-xl font-semibold tracking-tight mt-2'
-                  : block.type === 'heading3'
-                  ? 'font-display text-base font-semibold mt-1'
-                  : 'text-sm'
-              }
-            />
-          ) : (
-            <textarea
-              ref={textareaRef}
-              data-block-id={block.id}
-              rows={1}
-              value={block.content}
-              onChange={handleTextChange}
-              onKeyDown={handleKeyDown}
-              onCopy={handleTextareaCopy}
-              onCut={handleTextareaCut}
-              onPaste={handleTextareaPaste}
-              placeholder={
-                block.type === 'heading1'
-                  ? 'Intestazione 1'
-                  : block.type === 'heading2'
-                  ? 'Intestazione 2'
-                  : block.type === 'heading3'
-                  ? 'Intestazione 3'
-                  : 'Scrivi qualcosa, oppure digita "/" per i blocchi multimediali...'
-              }
-              style={{ color: 'var(--theme-text-main)' }}
-              className={`w-full bg-transparent resize-none border-none outline-none leading-relaxed transition-colors ${
-                block.type === 'heading1'
-                  ? 'font-display text-2xl font-bold tracking-tight'
-                  : block.type === 'heading2'
-                  ? 'font-display text-xl font-semibold tracking-tight mt-2'
-                  : block.type === 'heading3'
-                  ? 'font-display text-base font-semibold mt-1'
-                  : 'text-sm'
-              }`}
-            />
-          )
+          <InlineRichEditor
+            block={block}
+            index={index}
+            totalBlocks={totalBlocks}
+            autoFocus={autoFocus}
+            focusPosition={focusPosition}
+            focusTarget={focusTarget}
+            onFocusHandled={onFocusHandled}
+            onNavigateCursor={onNavigateCursor}
+            onShiftBoundary={onShiftBoundary}
+            onUpdate={onUpdate}
+            onDelete={onDelete}
+            onInsertBelow={onInsertBelow}
+            onMergeWithPrevious={onMergeWithPrevious}
+            onMergeWithNext={onMergeWithNext}
+            showSlashMenu={showSlashMenu}
+            onSlashTrigger={(val) => {
+              setShowSlashMenu(true);
+              setSlashQuery(val);
+            }}
+            placeholder={
+              block.type === 'heading1'
+                ? 'Intestazione 1'
+                : block.type === 'heading2'
+                ? 'Intestazione 2'
+                : block.type === 'heading3'
+                ? 'Intestazione 3'
+                : 'Scrivi qualcosa, oppure digita "/" per i blocchi multimediali...'
+            }
+            style={{ color: 'var(--theme-text-main)' }}
+            className={
+              block.type === 'heading1'
+                ? 'font-display text-2xl font-bold tracking-tight'
+                : block.type === 'heading2'
+                ? 'font-display text-xl font-semibold tracking-tight mt-2'
+                : block.type === 'heading3'
+                ? 'font-display text-base font-semibold mt-1'
+                : 'text-sm'
+            }
+          />
         )}
 
         {/* To-Do Checklist Block */}
@@ -802,51 +985,34 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
                       borderColor: 'var(--theme-border)',
                     }
               }
-              className="mt-1 w-4 h-4 rounded flex items-center justify-center border transition-all"
+              className="mt-1 w-4 h-4 rounded flex items-center justify-center border transition-all select-none"
             >
               {block.completed && <Check className="w-3 h-3 stroke-[3]" />}
             </button>
-            {hasLinks ? (
-              <InlineRichEditor
-                block={block}
-                index={index}
-                totalBlocks={totalBlocks}
-                autoFocus={autoFocus}
-                focusPosition={focusPosition}
-                onFocusHandled={onFocusHandled}
-                onUpdate={onUpdate}
-                onInsertBelow={onInsertBelow}
-                onMergeWithPrevious={onMergeWithPrevious}
-                onMergeWithNext={onMergeWithNext}
-                showSlashMenu={showSlashMenu}
-                onSlashTrigger={(val) => {
-                  setShowSlashMenu(true);
-                  setSlashQuery(val);
-                }}
-                placeholder="Attività da completare..."
-                style={{ color: 'var(--theme-text-main)' }}
-                className={`flex-1 text-sm ${block.completed ? 'line-through opacity-50' : ''}`}
-              />
-            ) : (
-              <textarea
-                ref={textareaRef}
-                data-block-id={block.id}
-                rows={1}
-                value={block.content}
-                onChange={handleTextChange}
-                onKeyDown={handleKeyDown}
-                onCopy={handleTextareaCopy}
-                onCut={handleTextareaCut}
-                onPaste={handleTextareaPaste}
-                placeholder="Attività da completare..."
-                style={{ color: 'var(--theme-text-main)' }}
-                className={`flex-1 bg-transparent resize-none border-none outline-none text-sm leading-relaxed transition-all ${
-                  block.completed
-                    ? 'line-through opacity-50'
-                    : ''
-                }`}
-              />
-            )}
+            <InlineRichEditor
+              block={block}
+              index={index}
+              totalBlocks={totalBlocks}
+              autoFocus={autoFocus}
+              focusPosition={focusPosition}
+              focusTarget={focusTarget}
+              onFocusHandled={onFocusHandled}
+              onNavigateCursor={onNavigateCursor}
+              onShiftBoundary={onShiftBoundary}
+              onUpdate={onUpdate}
+              onDelete={onDelete}
+              onInsertBelow={onInsertBelow}
+              onMergeWithPrevious={onMergeWithPrevious}
+              onMergeWithNext={onMergeWithNext}
+              showSlashMenu={showSlashMenu}
+              onSlashTrigger={(val) => {
+                setShowSlashMenu(true);
+                setSlashQuery(val);
+              }}
+              placeholder="Attività da completare..."
+              style={{ color: 'var(--theme-text-main)' }}
+              className={`flex-1 text-sm ${block.completed ? 'line-through opacity-50' : ''}`}
+            />
           </div>
         )}
 
@@ -898,6 +1064,7 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
               rows={3}
               value={block.content}
               onChange={(e) => onUpdate({ ...block, content: e.target.value })}
+              onKeyDown={handleKeyDown}
               onCopy={handleTextareaCopy}
               onCut={handleTextareaCut}
               onPaste={handleTextareaPaste}
@@ -947,6 +1114,47 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
                     onChange={(e) =>
                       onUpdate({ ...block, caption: e.target.value })
                     }
+                    onKeyDown={(e) => {
+                      if ((e.key === 'Delete' || e.key === 'Del') && e.altKey) {
+                        e.preventDefault();
+                        onDelete(block.id);
+                      } else if (
+                        (e.key === 'Delete' || e.key === 'Del') &&
+                        e.shiftKey &&
+                        !e.altKey &&
+                        !e.ctrlKey &&
+                        !e.metaKey
+                      ) {
+                        const input = e.currentTarget;
+                        const start = input.selectionStart || 0;
+                        const end = input.selectionEnd || 0;
+                        if (start !== end) {
+                          e.preventDefault();
+                          const sel = input.value.slice(start, end);
+                          if (sel) {
+                            writeMultiMimeToClipboard(sel);
+                            const updated = input.value.slice(0, start) + input.value.slice(end);
+                            onUpdate({ ...block, caption: updated });
+                            requestAnimationFrame(() => input.setSelectionRange(start, start));
+                          }
+                        }
+                      }
+                    }}
+                    onCut={(e) => {
+                      const input = e.currentTarget;
+                      const start = input.selectionStart || 0;
+                      const end = input.selectionEnd || 0;
+                      if (start !== end) {
+                        e.preventDefault();
+                        const sel = input.value.slice(start, end);
+                        if (sel) {
+                          writeMultiMimeToClipboard(sel, e);
+                          const updated = input.value.slice(0, start) + input.value.slice(end);
+                          onUpdate({ ...block, caption: updated });
+                          requestAnimationFrame(() => input.setSelectionRange(start, start));
+                        }
+                      }
+                    }}
                     placeholder="Aggiungi una didascalia opzionale..."
                     className="w-full text-xs text-neutral-500 dark:text-neutral-400 bg-transparent border-none outline-none text-center placeholder:text-neutral-300 dark:placeholder:text-neutral-600"
                   />
@@ -1103,44 +1311,31 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
             }}
             className="my-2 p-3.5 rounded-xl border flex items-start gap-3"
           >
-            <span className="text-lg leading-none mt-0.5">{block.icon || '💡'}</span>
-            {hasLinks ? (
-              <InlineRichEditor
-                block={block}
-                index={index}
-                totalBlocks={totalBlocks}
-                autoFocus={autoFocus}
-                focusPosition={focusPosition}
-                onFocusHandled={onFocusHandled}
-                onUpdate={onUpdate}
-                onInsertBelow={onInsertBelow}
-                onMergeWithPrevious={onMergeWithPrevious}
-                onMergeWithNext={onMergeWithNext}
-                showSlashMenu={showSlashMenu}
-                onSlashTrigger={(val) => {
-                  setShowSlashMenu(true);
-                  setSlashQuery(val);
-                }}
-                placeholder="Scrivi una nota in evidenza o un consiglio..."
-                style={{ color: 'var(--theme-text-main)' }}
-                className="flex-1 text-xs"
-              />
-            ) : (
-              <textarea
-                ref={textareaRef}
-                data-block-id={block.id}
-                rows={1}
-                value={block.content}
-                onChange={handleTextChange}
-                onKeyDown={handleKeyDown}
-                onCopy={handleTextareaCopy}
-                onCut={handleTextareaCut}
-                onPaste={handleTextareaPaste}
-                placeholder="Scrivi una nota in evidenza o un consiglio..."
-                style={{ color: 'var(--theme-text-main)' }}
-                className="flex-1 bg-transparent resize-none border-none outline-none text-xs leading-relaxed"
-              />
-            )}
+            <span className="text-lg leading-none mt-0.5 select-none">{block.icon || '💡'}</span>
+            <InlineRichEditor
+              block={block}
+              index={index}
+              totalBlocks={totalBlocks}
+              autoFocus={autoFocus}
+              focusPosition={focusPosition}
+              focusTarget={focusTarget}
+              onFocusHandled={onFocusHandled}
+              onNavigateCursor={onNavigateCursor}
+              onShiftBoundary={onShiftBoundary}
+              onUpdate={onUpdate}
+              onDelete={onDelete}
+              onInsertBelow={onInsertBelow}
+              onMergeWithPrevious={onMergeWithPrevious}
+              onMergeWithNext={onMergeWithNext}
+              showSlashMenu={showSlashMenu}
+              onSlashTrigger={(val) => {
+                setShowSlashMenu(true);
+                setSlashQuery(val);
+              }}
+              placeholder="Scrivi una nota in evidenza o un consiglio..."
+              style={{ color: 'var(--theme-text-main)' }}
+              className="flex-1 text-xs"
+            />
           </div>
         )}
 
@@ -1150,43 +1345,30 @@ export const BlockRenderer: React.FC<BlockRendererProps> = ({
             style={{ borderLeftColor: 'var(--theme-accent)' }}
             className="my-2 pl-3 border-l-2"
           >
-            {hasLinks ? (
-              <InlineRichEditor
-                block={block}
-                index={index}
-                totalBlocks={totalBlocks}
-                autoFocus={autoFocus}
-                focusPosition={focusPosition}
-                onFocusHandled={onFocusHandled}
-                onUpdate={onUpdate}
-                onInsertBelow={onInsertBelow}
-                onMergeWithPrevious={onMergeWithPrevious}
-                onMergeWithNext={onMergeWithNext}
-                showSlashMenu={showSlashMenu}
-                onSlashTrigger={(val) => {
-                  setShowSlashMenu(true);
-                  setSlashQuery(val);
-                }}
-                placeholder="Inserisci una citazione..."
-                style={{ color: 'var(--theme-text-main)' }}
-                className="w-full italic text-sm"
-              />
-            ) : (
-              <textarea
-                ref={textareaRef}
-                data-block-id={block.id}
-                rows={1}
-                value={block.content}
-                onChange={handleTextChange}
-                onKeyDown={handleKeyDown}
-                onCopy={handleTextareaCopy}
-                onCut={handleTextareaCut}
-                onPaste={handleTextareaPaste}
-                placeholder="Inserisci una citazione..."
-                style={{ color: 'var(--theme-text-main)' }}
-                className="w-full bg-transparent resize-none border-none outline-none italic text-sm leading-relaxed"
-              />
-            )}
+            <InlineRichEditor
+              block={block}
+              index={index}
+              totalBlocks={totalBlocks}
+              autoFocus={autoFocus}
+              focusPosition={focusPosition}
+              focusTarget={focusTarget}
+              onFocusHandled={onFocusHandled}
+              onNavigateCursor={onNavigateCursor}
+              onShiftBoundary={onShiftBoundary}
+              onUpdate={onUpdate}
+              onDelete={onDelete}
+              onInsertBelow={onInsertBelow}
+              onMergeWithPrevious={onMergeWithPrevious}
+              onMergeWithNext={onMergeWithNext}
+              showSlashMenu={showSlashMenu}
+              onSlashTrigger={(val) => {
+                setShowSlashMenu(true);
+                setSlashQuery(val);
+              }}
+              placeholder="Inserisci una citazione..."
+              style={{ color: 'var(--theme-text-main)' }}
+              className="w-full italic text-sm"
+            />
           </div>
         )}
       </div>

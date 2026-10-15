@@ -86,8 +86,33 @@ export const Sidebar = forwardRef<SidebarHandle, SidebarProps>(
     const [isAllOpen, setIsAllOpen] = useState(true);
     const searchInputRef = useRef<HTMLInputElement>(null);
 
-    const tabFootprint = React.useMemo(() => {
-      return getFullTabMemoryFootprint(notes, workspaceStatus);
+    const [tabFootprint, setTabFootprint] = useState(() =>
+      getFullTabMemoryFootprint(notes, workspaceStatus)
+    );
+
+    useEffect(() => {
+      // Immediate update on notes or workspace status change
+      setTabFootprint(getFullTabMemoryFootprint(notes, workspaceStatus));
+
+      // Periodic polling (every 3 seconds) to reflect live V8 heap changes and GC sweeps
+      const intervalId = setInterval(() => {
+        if (typeof document !== 'undefined' && document.hidden) return;
+        setTabFootprint((prev) => {
+          const next = getFullTabMemoryFootprint(notes, workspaceStatus);
+          // Bailout if formatted values have not changed to avoid unnecessary re-renders
+          if (
+            prev.formattedTotalRecoverable === next.formattedTotalRecoverable &&
+            prev.formattedJsHeapUsed === next.formattedJsHeapUsed &&
+            prev.formattedDecodedBitmaps === next.formattedDecodedBitmaps &&
+            prev.formattedWorkspaceData === next.formattedWorkspaceData
+          ) {
+            return prev;
+          }
+          return next;
+        });
+      }, 3000);
+
+      return () => clearInterval(intervalId);
     }, [notes, workspaceStatus]);
 
     useImperativeHandle(ref, () => ({
@@ -446,7 +471,7 @@ export const Sidebar = forwardRef<SidebarHandle, SidebarProps>(
             borderColor: 'var(--theme-border)',
             backgroundColor: 'var(--theme-bg-sidebar)',
           }}
-          className="px-3 py-2 border-t flex items-center justify-between text-xs"
+          className="h-10 px-3 border-t flex items-center justify-between text-xs shrink-0"
         >
           <div className="flex items-center gap-2 min-w-0">
             {currentUser ? (

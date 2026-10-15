@@ -28,6 +28,10 @@
     color: inherit;
   }
 
+  textarea.resize-none {
+    overflow: hidden !important;
+  }
+
   ::placeholder {
     color: var(--theme-text-muted) !important;
     opacity: 0.75;

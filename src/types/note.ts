@@ -24,6 +24,9 @@ export interface NoteBlock {
   icon?: string;     // icon for callout
 }
 
+export type ConcreteContentWidth = '44em' | '50%' | '75%' | '95%' | '100%';
+export type ContentWidthSetting = 'default' | ConcreteContentWidth;
+
 export interface Note {
   id: string;
   workspaceId: string;
@@ -35,6 +38,7 @@ export interface Note {
   createdAt: number;
   updatedAt: number;
   blocks: NoteBlock[];
+  contentWidth?: ContentWidthSetting;
 }
 
 export interface WorkspaceMeta {
@@ -42,6 +46,7 @@ export interface WorkspaceMeta {
   name: string;
   icon: string;
   themeId?: string;
+  defaultContentWidth?: ConcreteContentWidth;
   createdAt: number;
   updatedAt: number;
 }

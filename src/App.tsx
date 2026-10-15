@@ -7,10 +7,21 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Note, NoteBlock, BlockType, SyncStatus, WorkspaceMeta, WorkspaceStatus } from './types/note';
 import { Sidebar, SidebarHandle } from './components/Sidebar';
 import { EditorHeader } from './components/EditorHeader';
+import { EditorFooter } from './components/EditorFooter';
 import { BlockRenderer } from './components/BlockRenderer';
+import { SelectionOverlay } from './components/SelectionOverlay';
 import { LightboxModal } from './components/LightboxModal';
 import { GlobalSearchModal } from './components/GlobalSearchModal';
 import { MemoryDiagnosticsModal } from './components/MemoryDiagnosticsModal';
+import {
+  MultiBlockSelection,
+  computeMultiBlockSelectionRects,
+  extractMultiBlockText,
+  deleteMultiBlockSelection,
+  getCharOffsetFromDomPoint,
+  getDomPointFromCharOffset,
+} from './lib/crossBlockSelection';
+import { writeMultiMimeToClipboard } from './lib/clipboard';
 import {
   getWorkspacesManifest,
   saveWorkspacesManifest,
@@ -29,6 +40,11 @@ import {
   getThemeCssVariables,
   DEFAULT_THEME_ID,
 } from './lib/themes';
+import {
+  getContentWidthCss,
+  FALLBACK_DEFAULT_WIDTH,
+  ConcreteContentWidth,
+} from './lib/contentWidth';
 import {
   auth,
   db,
@@ -50,9 +66,11 @@ import {
 import { User } from 'firebase/auth';
 import { Plus, FileText, Database, Power, Globe } from 'lucide-react';
 
-interface FocusTarget {
+export interface FocusTarget {
   id: string;
   cursorPosition?: 'start' | 'end' | number;
+  targetClientX?: number;
+  targetLine?: 'first' | 'last';
 }
 
 const ACTIVE_WS_KEY = 'liteblocks_active_ws_id_v1';
@@ -60,7 +78,20 @@ const THEME_KEY = 'liteblocks_theme_v1';
 
 export default function App() {
   const sidebarRef = useRef<SidebarHandle>(null);
+  const canvasScrollRef = useRef<HTMLDivElement>(null);
   const [focusedBlockTarget, setFocusedBlockTarget] = useState<FocusTarget | null>(null);
+  const [multiBlockSelection, setMultiBlockSelection] = useState<MultiBlockSelection | null>(null);
+  const multiBlockSelectionRef = useRef<MultiBlockSelection | null>(null);
+  multiBlockSelectionRef.current = multiBlockSelection;
+  const [selectionRects, setSelectionRects] = useState<DOMRect[]>([]);
+  const isDraggingRef = useRef(false);
+  const dragStartPointRef = useRef<{
+    blockId: string;
+    blockIndex: number;
+    offset: number;
+    clientX: number;
+    clientY: number;
+  } | null>(null);
 
   // Workspaces Manifest (ultra-lightweight metadata list)
   const [workspaces, setWorkspaces] = useState<WorkspaceMeta[]>(() => {
@@ -165,6 +196,19 @@ export default function App() {
 
   const activeWsMeta = workspaces.find((w) => w.id === activeWorkspaceId);
   const currentTheme = getThemeById(activeWsMeta?.themeId || (isDarkMode ? 'tokyo-night' : DEFAULT_THEME_ID));
+  const activeWsDefaultContentWidth = activeWsMeta?.defaultContentWidth || FALLBACK_DEFAULT_WIDTH;
+
+  const handleSetWorkspaceDefaultContentWidth = (width: ConcreteContentWidth) => {
+    setWorkspaces((prev) => {
+      const updated = prev.map((w) =>
+        w.id === activeWorkspaceId
+          ? { ...w, defaultContentWidth: width, updatedAt: Date.now() }
+          : w
+      );
+      saveWorkspacesManifest(updated);
+      return updated;
+    });
+  };
 
   // Apply active theme variables and dark mode class to html element
   useEffect(() => {
@@ -378,6 +422,7 @@ export default function App() {
             updatedAt:
               data.updatedAt?.toMillis?.() || data.updatedAt || Date.now(),
             blocks: Array.isArray(data.blocks) ? data.blocks : [],
+            contentWidth: data.contentWidth || undefined,
           });
         });
 
@@ -456,6 +501,7 @@ export default function App() {
             };
             if (noteToSync.icon) createPayload.icon = noteToSync.icon;
             if (noteToSync.coverUrl) createPayload.coverUrl = noteToSync.coverUrl;
+            if (noteToSync.contentWidth) createPayload.contentWidth = noteToSync.contentWidth;
 
             await setDoc(docRef, createPayload);
             knownCloudDocIds.current.add(noteToSync.id);
@@ -469,6 +515,7 @@ export default function App() {
             };
             if (noteToSync.icon) updatePayload.icon = noteToSync.icon;
             if (noteToSync.coverUrl) updatePayload.coverUrl = noteToSync.coverUrl;
+            if (noteToSync.contentWidth) updatePayload.contentWidth = noteToSync.contentWidth;
 
             await setDoc(docRef, updatePayload, { merge: true });
           }
@@ -515,16 +562,16 @@ export default function App() {
     if (!activeNote) return;
     const index = activeNote.blocks.findIndex((b) => b.id === blockId);
     const newBlocks = activeNote.blocks.filter((b) => b.id !== blockId);
-    if (newBlocks.length > 0) {
-      const prevIndex = Math.max(0, index - 1);
-      setFocusedBlockTarget({ id: newBlocks[prevIndex].id, cursorPosition: 'end' });
-    }
-    handleUpdateNote({
-      blocks:
-        newBlocks.length === 0
-          ? [{ id: 'b-' + Date.now(), type: 'paragraph', content: '' }]
-          : newBlocks,
-    });
+
+    const finalBlocks =
+      newBlocks.length === 0
+        ? [{ id: 'b-' + Date.now(), type: 'paragraph' as BlockType, content: '' }]
+        : newBlocks;
+
+    const targetIndex = newBlocks.length === 0 ? 0 : Math.max(0, index - 1);
+    setFocusedBlockTarget({ id: finalBlocks[targetIndex].id, cursorPosition: 'end' });
+
+    handleUpdateNote({ blocks: finalBlocks });
   };
 
   const handleInsertBlockBelow = (
@@ -622,6 +669,594 @@ export default function App() {
     handleUpdateNote({ blocks: newBlocks });
   };
 
+  const handleNavigateCursor = (
+    direction: 'up' | 'down',
+    fromIndex: number | 'title',
+    currentClientX: number
+  ) => {
+    if (!activeNote) return;
+
+    if (direction === 'up') {
+      if (fromIndex === 'title') {
+        return;
+      }
+      if (fromIndex === 0) {
+        setFocusedBlockTarget({
+          id: 'note-title',
+          targetLine: 'last',
+          targetClientX: currentClientX,
+        });
+        return;
+      }
+      let prevIdx = fromIndex - 1;
+      while (prevIdx >= 0 && (activeNote.blocks[prevIdx].type === 'image' || activeNote.blocks[prevIdx].type === 'file')) {
+        prevIdx--;
+      }
+      if (prevIdx >= 0) {
+        setFocusedBlockTarget({
+          id: activeNote.blocks[prevIdx].id,
+          targetLine: 'last',
+          targetClientX: currentClientX,
+        });
+      } else {
+        setFocusedBlockTarget({
+          id: 'note-title',
+          targetLine: 'last',
+          targetClientX: currentClientX,
+        });
+      }
+    } else {
+      if (fromIndex === 'title') {
+        let firstIdx = 0;
+        while (firstIdx < activeNote.blocks.length && (activeNote.blocks[firstIdx].type === 'image' || activeNote.blocks[firstIdx].type === 'file')) {
+          firstIdx++;
+        }
+        if (firstIdx < activeNote.blocks.length) {
+          setFocusedBlockTarget({
+            id: activeNote.blocks[firstIdx].id,
+            targetLine: 'first',
+            targetClientX: currentClientX,
+          });
+        }
+        return;
+      }
+      let nextIdx = fromIndex + 1;
+      while (nextIdx < activeNote.blocks.length && (activeNote.blocks[nextIdx].type === 'image' || activeNote.blocks[nextIdx].type === 'file')) {
+        nextIdx++;
+      }
+      if (nextIdx < activeNote.blocks.length) {
+        setFocusedBlockTarget({
+          id: activeNote.blocks[nextIdx].id,
+          targetLine: 'first',
+          targetClientX: currentClientX,
+        });
+      }
+    }
+  };
+
+  const handleShiftBoundary = (
+    direction: 'up' | 'down' | 'left' | 'right',
+    fromIndex: number,
+    anchorOffset: number,
+    _focusOffset: number,
+    _clientX?: number
+  ) => {
+    if (!activeNote) return;
+
+    if (direction === 'up' && fromIndex > 0) {
+      const targetIndex = fromIndex - 1;
+      const targetBlock = activeNote.blocks[targetIndex];
+      const targetOffset = targetBlock.content?.length || 0;
+
+      const newSelection: MultiBlockSelection = {
+        anchor: {
+          blockId: activeNote.blocks[fromIndex].id,
+          blockIndex: fromIndex,
+          offset: anchorOffset,
+        },
+        focus: {
+          blockId: targetBlock.id,
+          blockIndex: targetIndex,
+          offset: targetOffset,
+        },
+      };
+      window.getSelection()?.removeAllRanges();
+      setMultiBlockSelection(newSelection);
+      if (canvasScrollRef.current) {
+        setSelectionRects(
+          computeMultiBlockSelectionRects(canvasScrollRef.current, activeNote.blocks, newSelection)
+        );
+      }
+    } else if (direction === 'down' && fromIndex < activeNote.blocks.length - 1) {
+      const targetIndex = fromIndex + 1;
+      const targetBlock = activeNote.blocks[targetIndex];
+      const targetOffset = 0;
+
+      const newSelection: MultiBlockSelection = {
+        anchor: {
+          blockId: activeNote.blocks[fromIndex].id,
+          blockIndex: fromIndex,
+          offset: anchorOffset,
+        },
+        focus: {
+          blockId: targetBlock.id,
+          blockIndex: targetIndex,
+          offset: targetOffset,
+        },
+      };
+      window.getSelection()?.removeAllRanges();
+      setMultiBlockSelection(newSelection);
+      if (canvasScrollRef.current) {
+        setSelectionRects(
+          computeMultiBlockSelectionRects(canvasScrollRef.current, activeNote.blocks, newSelection)
+        );
+      }
+    } else if (direction === 'left' && fromIndex > 0) {
+      const targetIndex = fromIndex - 1;
+      const targetBlock = activeNote.blocks[targetIndex];
+      const newSelection: MultiBlockSelection = {
+        anchor: {
+          blockId: activeNote.blocks[fromIndex].id,
+          blockIndex: fromIndex,
+          offset: anchorOffset,
+        },
+        focus: {
+          blockId: targetBlock.id,
+          blockIndex: targetIndex,
+          offset: targetBlock.content?.length || 0,
+        },
+      };
+      window.getSelection()?.removeAllRanges();
+      setMultiBlockSelection(newSelection);
+      if (canvasScrollRef.current) {
+        setSelectionRects(
+          computeMultiBlockSelectionRects(canvasScrollRef.current, activeNote.blocks, newSelection)
+        );
+      }
+    } else if (direction === 'right' && fromIndex < activeNote.blocks.length - 1) {
+      const targetIndex = fromIndex + 1;
+      const targetBlock = activeNote.blocks[targetIndex];
+      const newSelection: MultiBlockSelection = {
+        anchor: {
+          blockId: activeNote.blocks[fromIndex].id,
+          blockIndex: fromIndex,
+          offset: anchorOffset,
+        },
+        focus: {
+          blockId: targetBlock.id,
+          blockIndex: targetIndex,
+          offset: 0,
+        },
+      };
+      window.getSelection()?.removeAllRanges();
+      setMultiBlockSelection(newSelection);
+      if (canvasScrollRef.current) {
+        setSelectionRects(
+          computeMultiBlockSelectionRects(canvasScrollRef.current, activeNote.blocks, newSelection)
+        );
+      }
+    }
+  };
+
+  // Canvas Mouse Down: Detect start of potential drag selection
+  const handleCanvasMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+
+    // Ignore interactive UI elements like buttons, inputs, links, dropdowns
+    const target = e.target as HTMLElement;
+    if (target.closest('button, select, input, a, [role="button"], .group\\/submenu')) {
+      return;
+    }
+
+    const blockEl = target.closest<HTMLElement>('[data-block-id]');
+    if (!blockEl || !activeNote) {
+      if (multiBlockSelection) {
+        multiBlockSelectionRef.current = null;
+        setMultiBlockSelection(null);
+        setSelectionRects([]);
+      }
+      return;
+    }
+
+    const blockId = blockEl.getAttribute('data-block-id');
+    const blockIndex = activeNote.blocks.findIndex((b) => b.id === blockId);
+    if (blockIndex === -1) return;
+
+    let charOffset = 0;
+    if (document.caretPositionFromPoint) {
+      const pos = document.caretPositionFromPoint(e.clientX, e.clientY);
+      if (pos && blockEl.contains(pos.offsetNode)) {
+        charOffset = getCharOffsetFromDomPoint(blockEl, pos.offsetNode, pos.offset);
+      }
+    } else if ((document as any).caretRangeFromPoint) {
+      const r = (document as any).caretRangeFromPoint(e.clientX, e.clientY);
+      if (r && blockEl.contains(r.startContainer)) {
+        charOffset = getCharOffsetFromDomPoint(blockEl, r.startContainer, r.startOffset);
+      }
+    }
+
+    isDraggingRef.current = true;
+    dragStartPointRef.current = {
+      blockId: blockId!,
+      blockIndex,
+      offset: charOffset,
+      clientX: e.clientX,
+      clientY: e.clientY,
+    };
+
+    if (multiBlockSelection) {
+      multiBlockSelectionRef.current = null;
+      setMultiBlockSelection(null);
+      setSelectionRects([]);
+    }
+  };
+
+  // Mouse drag across blocks tracking
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isDraggingRef.current || !dragStartPointRef.current || !activeNote) return;
+
+      const target = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+      let blockEl = target?.closest<HTMLElement>('[data-block-id]');
+      let isAboveBlock = false;
+      let isBelowBlock = false;
+
+      // If mouse is in margins or between blocks, find closest block vertically
+      if (!blockEl && canvasScrollRef.current) {
+        const blockEls = Array.from(
+          canvasScrollRef.current.querySelectorAll<HTMLElement>('[data-block-id]')
+        );
+        if (blockEls.length > 0) {
+          let minDistance = Infinity;
+          let closestEl = blockEls[0];
+
+          for (const el of blockEls) {
+            const rect = el.getBoundingClientRect();
+            if (e.clientY >= rect.top && e.clientY <= rect.bottom) {
+              closestEl = el;
+              minDistance = 0;
+              break;
+            }
+            const dist = e.clientY < rect.top ? rect.top - e.clientY : e.clientY - rect.bottom;
+            if (dist < minDistance) {
+              minDistance = dist;
+              closestEl = el;
+            }
+          }
+          blockEl = closestEl;
+          const rect = blockEl.getBoundingClientRect();
+          if (e.clientY < rect.top) isAboveBlock = true;
+          if (e.clientY > rect.bottom) isBelowBlock = true;
+        }
+      } else if (blockEl) {
+        const rect = blockEl.getBoundingClientRect();
+        if (e.clientY < rect.top) isAboveBlock = true;
+        if (e.clientY > rect.bottom) isBelowBlock = true;
+      }
+
+      if (!blockEl) return;
+      const blockId = blockEl.getAttribute('data-block-id');
+      const blockIndex = activeNote.blocks.findIndex((b) => b.id === blockId);
+      if (blockIndex === -1) return;
+
+      const currentBlock = activeNote.blocks[blockIndex];
+      const contentLength = currentBlock.content?.length || 0;
+
+      let charOffset = 0;
+      if (isBelowBlock) {
+        charOffset = contentLength;
+      } else if (isAboveBlock) {
+        charOffset = 0;
+      } else {
+        const blockRect = blockEl.getBoundingClientRect();
+        const clampedY = Math.min(Math.max(e.clientY, blockRect.top + 2), blockRect.bottom - 2);
+
+        if (document.caretPositionFromPoint) {
+          const pos = document.caretPositionFromPoint(e.clientX, clampedY);
+          if (pos && blockEl.contains(pos.offsetNode)) {
+            charOffset = getCharOffsetFromDomPoint(blockEl, pos.offsetNode, pos.offset);
+          } else {
+            charOffset = e.clientX > blockRect.right ? contentLength : 0;
+          }
+        } else if ((document as any).caretRangeFromPoint) {
+          const r = (document as any).caretRangeFromPoint(e.clientX, clampedY);
+          if (r && blockEl.contains(r.startContainer)) {
+            charOffset = getCharOffsetFromDomPoint(blockEl, r.startContainer, r.startOffset);
+          } else {
+            charOffset = e.clientX > blockRect.right ? contentLength : 0;
+          }
+        }
+      }
+
+      const anchor = dragStartPointRef.current;
+      if (blockIndex !== anchor.blockIndex || multiBlockSelectionRef.current !== null) {
+        window.getSelection()?.removeAllRanges();
+
+        const newSelection: MultiBlockSelection = {
+          anchor: {
+            blockId: anchor.blockId,
+            blockIndex: anchor.blockIndex,
+            offset: anchor.offset,
+          },
+          focus: {
+            blockId: blockId!,
+            blockIndex,
+            offset: charOffset,
+          },
+        };
+        multiBlockSelectionRef.current = newSelection;
+        setMultiBlockSelection(newSelection);
+        if (canvasScrollRef.current) {
+          setSelectionRects(
+            computeMultiBlockSelectionRects(canvasScrollRef.current, activeNote.blocks, newSelection)
+          );
+        }
+      }
+    };
+
+    const handleMouseUp = () => {
+      isDraggingRef.current = false;
+      dragStartPointRef.current = null;
+      const currentMultiSel = multiBlockSelectionRef.current;
+      if (currentMultiSel) {
+        if (currentMultiSel.anchor.blockIndex === currentMultiSel.focus.blockIndex) {
+          const block = activeNote?.blocks[currentMultiSel.anchor.blockIndex];
+          if (block && canvasScrollRef.current) {
+            const editorEl = canvasScrollRef.current.querySelector<HTMLElement>(`[data-block-id="${block.id}"]`);
+            if (editorEl) {
+              const anchorPt = getDomPointFromCharOffset(editorEl, currentMultiSel.anchor.offset);
+              const focusPt = getDomPointFromCharOffset(editorEl, currentMultiSel.focus.offset);
+              editorEl.focus({ preventScroll: true });
+              const sel = window.getSelection();
+              if (sel) {
+                try {
+                  sel.setBaseAndExtent(anchorPt.node, anchorPt.offset, focusPt.node, focusPt.offset);
+                } catch {
+                  const isForward = currentMultiSel.anchor.offset <= currentMultiSel.focus.offset;
+                  const startPt = isForward ? anchorPt : focusPt;
+                  const endPt = isForward ? focusPt : anchorPt;
+                  try {
+                    const range = document.createRange();
+                    range.setStart(startPt.node, startPt.offset);
+                    range.setEnd(endPt.node, endPt.offset);
+                    sel.removeAllRanges();
+                    sel.addRange(range);
+                  } catch {
+                    // Fallback ignore
+                  }
+                }
+              }
+            }
+          }
+          multiBlockSelectionRef.current = null;
+          setMultiBlockSelection(null);
+          setSelectionRects([]);
+        } else {
+          window.getSelection()?.removeAllRanges();
+        }
+      }
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [activeNote, multiBlockSelection]);
+
+  // Recalculate selection rects on window resize or scroll
+  useEffect(() => {
+    if (!multiBlockSelection || !activeNote || !canvasScrollRef.current) return;
+    const updateRects = () => {
+      if (canvasScrollRef.current && multiBlockSelection && activeNote) {
+        setSelectionRects(
+          computeMultiBlockSelectionRects(canvasScrollRef.current, activeNote.blocks, multiBlockSelection)
+        );
+      }
+    };
+    window.addEventListener('resize', updateRects);
+    const scrollEl = canvasScrollRef.current;
+    scrollEl.addEventListener('scroll', updateRects);
+    return () => {
+      window.removeEventListener('resize', updateRects);
+      scrollEl.removeEventListener('scroll', updateRects);
+    };
+  }, [multiBlockSelection, activeNote]);
+
+  // Keyboard operations for active multi-block selection (Copy, Cut, Delete, Typing, Shift+Arrows)
+  useEffect(() => {
+    if (!multiBlockSelection || !activeNote) return;
+
+    const handleKeyDownCapture = (e: KeyboardEvent) => {
+      // 1. Copy (Ctrl+C / Cmd+C)
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C')) {
+        e.preventDefault();
+        e.stopPropagation();
+        const { plain } = extractMultiBlockText(activeNote.blocks, multiBlockSelection);
+        writeMultiMimeToClipboard(plain);
+        return;
+      }
+
+      // 2. Cut (Ctrl+X / Cmd+X) or WM_CUT (Shift+Delete)
+      if (
+        ((e.ctrlKey || e.metaKey) && (e.key === 'x' || e.key === 'X')) ||
+        (e.shiftKey && (e.key === 'Delete' || e.key === 'Del') && !e.ctrlKey && !e.metaKey && !e.altKey)
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        const { plain } = extractMultiBlockText(activeNote.blocks, multiBlockSelection);
+        writeMultiMimeToClipboard(plain);
+        const { newBlocks, targetBlockId, targetOffset } = deleteMultiBlockSelection(
+          activeNote.blocks,
+          multiBlockSelection,
+          ''
+        );
+        handleUpdateNote({ blocks: newBlocks });
+        setFocusedBlockTarget({ id: targetBlockId, cursorPosition: targetOffset });
+        setMultiBlockSelection(null);
+        setSelectionRects([]);
+        return;
+      }
+
+      // 3. Delete / Backspace
+      if (e.key === 'Backspace' || e.key === 'Delete' || e.key === 'Del') {
+        e.preventDefault();
+        e.stopPropagation();
+        const { newBlocks, targetBlockId, targetOffset } = deleteMultiBlockSelection(
+          activeNote.blocks,
+          multiBlockSelection,
+          ''
+        );
+        handleUpdateNote({ blocks: newBlocks });
+        setFocusedBlockTarget({ id: targetBlockId, cursorPosition: targetOffset });
+        setMultiBlockSelection(null);
+        setSelectionRects([]);
+        return;
+      }
+
+      // 4. Escape: dismiss selection
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        setMultiBlockSelection(null);
+        setSelectionRects([]);
+        return;
+      }
+
+      // 5. Shift+Arrows navigation / expansion
+      if (e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          e.stopPropagation();
+          if (multiBlockSelection.focus.blockIndex > 0) {
+            const nextIdx = multiBlockSelection.focus.blockIndex - 1;
+            const targetBlock = activeNote.blocks[nextIdx];
+            const targetLen = targetBlock.content?.length || 0;
+            const newFocusOffset = Math.min(multiBlockSelection.focus.offset, targetLen);
+            const updated: MultiBlockSelection = {
+              ...multiBlockSelection,
+              focus: {
+                blockId: targetBlock.id,
+                blockIndex: nextIdx,
+                offset: newFocusOffset,
+              },
+            };
+            setMultiBlockSelection(updated);
+            if (canvasScrollRef.current) {
+              setSelectionRects(
+                computeMultiBlockSelectionRects(canvasScrollRef.current, activeNote.blocks, updated)
+              );
+            }
+          }
+          return;
+        }
+
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          e.stopPropagation();
+          if (multiBlockSelection.focus.blockIndex < activeNote.blocks.length - 1) {
+            const nextIdx = multiBlockSelection.focus.blockIndex + 1;
+            const targetBlock = activeNote.blocks[nextIdx];
+            const targetLen = targetBlock.content?.length || 0;
+            const newFocusOffset = Math.min(multiBlockSelection.focus.offset, targetLen);
+            const updated: MultiBlockSelection = {
+              ...multiBlockSelection,
+              focus: {
+                blockId: targetBlock.id,
+                blockIndex: nextIdx,
+                offset: newFocusOffset,
+              },
+            };
+            setMultiBlockSelection(updated);
+            if (canvasScrollRef.current) {
+              setSelectionRects(
+                computeMultiBlockSelectionRects(canvasScrollRef.current, activeNote.blocks, updated)
+              );
+            }
+          }
+          return;
+        }
+
+        if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          e.stopPropagation();
+          let nextIdx = multiBlockSelection.focus.blockIndex;
+          let nextOffset = multiBlockSelection.focus.offset - 1;
+          if (nextOffset < 0 && nextIdx > 0) {
+            nextIdx -= 1;
+            nextOffset = activeNote.blocks[nextIdx].content?.length || 0;
+          }
+          if (nextOffset >= 0) {
+            const updated: MultiBlockSelection = {
+              ...multiBlockSelection,
+              focus: {
+                blockId: activeNote.blocks[nextIdx].id,
+                blockIndex: nextIdx,
+                offset: nextOffset,
+              },
+            };
+            setMultiBlockSelection(updated);
+            if (canvasScrollRef.current) {
+              setSelectionRects(
+                computeMultiBlockSelectionRects(canvasScrollRef.current, activeNote.blocks, updated)
+              );
+            }
+          }
+          return;
+        }
+
+        if (e.key === 'ArrowRight') {
+          e.preventDefault();
+          e.stopPropagation();
+          let nextIdx = multiBlockSelection.focus.blockIndex;
+          let nextOffset = multiBlockSelection.focus.offset + 1;
+          const currentLen = activeNote.blocks[nextIdx].content?.length || 0;
+          if (nextOffset > currentLen && nextIdx < activeNote.blocks.length - 1) {
+            nextIdx += 1;
+            nextOffset = 0;
+          }
+          if (nextIdx < activeNote.blocks.length) {
+            const updated: MultiBlockSelection = {
+              ...multiBlockSelection,
+              focus: {
+                blockId: activeNote.blocks[nextIdx].id,
+                blockIndex: nextIdx,
+                offset: Math.min(nextOffset, activeNote.blocks[nextIdx].content?.length || 0),
+              },
+            };
+            setMultiBlockSelection(updated);
+            if (canvasScrollRef.current) {
+              setSelectionRects(
+                computeMultiBlockSelectionRects(canvasScrollRef.current, activeNote.blocks, updated)
+              );
+            }
+          }
+          return;
+        }
+      }
+
+      // 6. Typing single printable character replaces selection
+      if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        const { newBlocks, targetBlockId, targetOffset } = deleteMultiBlockSelection(
+          activeNote.blocks,
+          multiBlockSelection,
+          e.key
+        );
+        handleUpdateNote({ blocks: newBlocks });
+        setFocusedBlockTarget({ id: targetBlockId, cursorPosition: targetOffset });
+        setMultiBlockSelection(null);
+        setSelectionRects([]);
+        return;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDownCapture, true);
+    return () => window.removeEventListener('keydown', handleKeyDownCapture, true);
+  }, [multiBlockSelection, activeNote]);
+
   const handleMoveBlockUp = (index: number) => {
     if (!activeNote || index === 0) return;
     const newBlocks = [...activeNote.blocks];
@@ -697,6 +1332,7 @@ export default function App() {
       isFavorite: false,
       createdAt: Date.now(),
       updatedAt: Date.now(),
+      contentWidth: 'default',
       blocks: [
         {
           id: 'b-' + Date.now(),
@@ -857,6 +1493,7 @@ export default function App() {
       name,
       icon,
       themeId: themeId || DEFAULT_THEME_ID,
+      defaultContentWidth: FALLBACK_DEFAULT_WIDTH,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -871,6 +1508,7 @@ export default function App() {
       isFavorite: false,
       createdAt: Date.now(),
       updatedAt: Date.now(),
+      contentWidth: 'default',
       blocks: [
         {
           id: 'b-init-1',
@@ -1047,114 +1685,148 @@ export default function App() {
           backgroundColor: 'var(--theme-bg-app)',
           color: 'var(--theme-text-main)',
         }}
-        className="flex-1 h-full overflow-y-auto flex flex-col relative"
+        className="flex-1 h-full overflow-hidden flex flex-col relative"
       >
-        {workspaceStatus === 'unloaded' ? (
-          // Unloaded Workspace Standby Screen (Zero Memory Footprint)
-          <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-neutral-400">
-            <div className="w-14 h-14 rounded-2xl bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center mb-4 text-neutral-500 shadow-xs">
-              <Power className="w-6 h-6 text-amber-500" />
+        <div
+          ref={canvasScrollRef}
+          onMouseDown={handleCanvasMouseDown}
+          className="flex-1 overflow-y-auto flex flex-col relative"
+        >
+          <SelectionOverlay rects={selectionRects} />
+          {workspaceStatus === 'unloaded' ? (
+            // Unloaded Workspace Standby Screen (Zero Memory Footprint)
+            <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-neutral-400">
+              <div className="w-14 h-14 rounded-2xl bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center mb-4 text-neutral-500 shadow-xs">
+                <Power className="w-6 h-6 text-amber-500" />
+              </div>
+              <h3 className="font-display text-lg font-bold text-neutral-900 dark:text-neutral-100 mb-1">
+                Workspace "{activeWsMeta?.name || 'Workspace'}" a riposo
+              </h3>
+              <p className="text-xs max-w-md text-neutral-500 dark:text-neutral-400 mb-5 leading-relaxed">
+                Questo workspace è stato scaricato dalla memoria RAM per garantire il massimo isolamento e liberare risorse. I documenti restano al sicuro nel loro storage dedicato.
+              </p>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => handleSelectWorkspaceInPlace(activeWorkspaceId)}
+                  className="flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-neutral-900 dark:bg-neutral-100 dark:text-neutral-900 rounded-lg shadow-sm hover:opacity-90 transition-opacity"
+                >
+                  <Database className="w-4 h-4" />
+                  <span>Carica workspace in memoria</span>
+                </button>
+              </div>
             </div>
-            <h3 className="font-display text-lg font-bold text-neutral-900 dark:text-neutral-100 mb-1">
-              Workspace "{activeWsMeta?.name || 'Workspace'}" a riposo
-            </h3>
-            <p className="text-xs max-w-md text-neutral-500 dark:text-neutral-400 mb-5 leading-relaxed">
-              Questo workspace è stato scaricato dalla memoria RAM per garantire il massimo isolamento e liberare risorse. I documenti restano al sicuro nel loro storage dedicato.
-            </p>
-            <div className="flex items-center gap-3">
-              <button
-                onClick={() => handleSelectWorkspaceInPlace(activeWorkspaceId)}
-                className="flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-neutral-900 dark:bg-neutral-100 dark:text-neutral-900 rounded-lg shadow-sm hover:opacity-90 transition-opacity"
+          ) : activeNote ? (
+            <div className="flex-1 pb-32">
+              <EditorHeader
+                note={activeNote}
+                defaultContentWidth={activeWsDefaultContentWidth}
+                focusedBlockTarget={focusedBlockTarget}
+                onFocusHandled={() => setFocusedBlockTarget(null)}
+                onNavigateCursor={handleNavigateCursor}
+                onUpdateNote={handleUpdateNote}
+              />
+
+              {/* Blocks canvas container */}
+              <div
+                style={{ maxWidth: getContentWidthCss(activeNote.contentWidth, activeWsDefaultContentWidth) }}
+                className="w-full mx-auto px-12 pt-6 space-y-1 transition-[max-width] duration-150"
+                onTransitionEnd={(e) => {
+                  if (e.propertyName === 'max-width') {
+                    window.dispatchEvent(new Event('resize'));
+                  }
+                }}
               >
-                <Database className="w-4 h-4" />
-                <span>Carica workspace in memoria</span>
+                {activeNote.blocks.map((block, idx) => (
+                  <BlockRenderer
+                    key={block.id}
+                    block={block}
+                    index={idx}
+                    totalBlocks={activeNote.blocks.length}
+                    autoFocus={focusedBlockTarget?.id === block.id}
+                    focusPosition={
+                      focusedBlockTarget?.id === block.id
+                        ? focusedBlockTarget.cursorPosition
+                        : undefined
+                    }
+                    focusTarget={
+                      focusedBlockTarget?.id === block.id
+                        ? focusedBlockTarget
+                        : null
+                    }
+                    onFocusHandled={() => setFocusedBlockTarget(null)}
+                    onNavigateCursor={handleNavigateCursor}
+                    onShiftBoundary={handleShiftBoundary}
+                    onUpdate={handleUpdateBlock}
+                    onDelete={handleDeleteBlock}
+                    onInsertBelow={handleInsertBlockBelow}
+                    onMergeWithPrevious={handleMergeWithPrevious}
+                    onMergeWithNext={handleMergeWithNext}
+                    onMoveUp={handleMoveBlockUp}
+                    onMoveDown={handleMoveBlockDown}
+                    onDuplicate={handleDuplicateBlock}
+                    onOpenLightbox={(src, caption) =>
+                      setLightboxData({ src, caption })
+                    }
+                    onReorderBlocks={handleReorderBlocks}
+                    onNavigateCrossWorkspace={handleNavigateCrossWorkspace}
+                  />
+                ))}
+
+                {/* Click or drop to add / append block at bottom */}
+                <div
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    const sourceIndexStr = e.dataTransfer.getData('text/plain');
+                    const sourceIndex = parseInt(sourceIndexStr, 10);
+                    if (!isNaN(sourceIndex) && activeNote.blocks.length > 0) {
+                      handleReorderBlocks(sourceIndex, activeNote.blocks.length - 1, 'bottom');
+                    }
+                  }}
+                  onClick={() =>
+                    handleInsertBlockBelow('paragraph', activeNote.blocks.length - 1)
+                  }
+                  className="h-28 cursor-text border-2 border-transparent hover:border-dashed hover:border-neutral-200 dark:hover:border-neutral-800 rounded-xl transition-colors mt-2"
+                  title="Clicca per aggiungere testo in fondo o rilascia per spostare alla fine"
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-neutral-400">
+              <div className="w-12 h-12 rounded-2xl bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center mb-4 text-neutral-500">
+                <FileText className="w-6 h-6" />
+              </div>
+              <h3 className="font-display text-base font-semibold text-neutral-800 dark:text-neutral-200 mb-1">
+                Nessuna nota in questo workspace
+              </h3>
+              <p className="text-xs max-w-sm mb-4">
+                Crea una nuova nota premendo <kbd className="px-1.5 py-0.5 rounded bg-neutral-200 dark:bg-neutral-700 font-mono text-[11px]">Ctrl+N</kbd> per iniziare a organizzare testi, to-do list, codice, foto e allegati.
+              </p>
+              <button
+                onClick={handleCreateNote}
+                className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-neutral-900 dark:bg-neutral-100 dark:text-neutral-900 rounded-lg shadow-sm hover:opacity-90 transition-opacity"
+              >
+                <Plus className="w-4 h-4" /> Crea la prima nota (Ctrl+N)
               </button>
             </div>
-          </div>
-        ) : activeNote ? (
-          <div className="flex-1 pb-32">
-            <EditorHeader
-              note={activeNote}
-              syncStatus={syncStatus}
-              isLoggedIn={!!currentUser}
-              onUpdateNote={handleUpdateNote}
-              onDeleteNote={handleDeleteNote}
-              onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
-              isSidebarOpen={isSidebarOpen}
-            />
+          )}
+        </div>
 
-            {/* Blocks canvas container */}
-            <div className="max-w-3xl mx-auto px-12 pt-6 space-y-1">
-              {activeNote.blocks.map((block, idx) => (
-                <BlockRenderer
-                  key={block.id}
-                  block={block}
-                  index={idx}
-                  totalBlocks={activeNote.blocks.length}
-                  autoFocus={focusedBlockTarget?.id === block.id}
-                  focusPosition={
-                    focusedBlockTarget?.id === block.id
-                      ? focusedBlockTarget.cursorPosition
-                      : undefined
-                  }
-                  onFocusHandled={() => setFocusedBlockTarget(null)}
-                  onUpdate={handleUpdateBlock}
-                  onDelete={handleDeleteBlock}
-                  onInsertBelow={handleInsertBlockBelow}
-                  onMergeWithPrevious={handleMergeWithPrevious}
-                  onMergeWithNext={handleMergeWithNext}
-                  onMoveUp={handleMoveBlockUp}
-                  onMoveDown={handleMoveBlockDown}
-                  onDuplicate={handleDuplicateBlock}
-                  onOpenLightbox={(src, caption) =>
-                    setLightboxData({ src, caption })
-                  }
-                  onReorderBlocks={handleReorderBlocks}
-                  onNavigateCrossWorkspace={handleNavigateCrossWorkspace}
-                />
-              ))}
-
-              {/* Click or drop to add / append block at bottom */}
-              <div
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  e.dataTransfer.dropEffect = 'move';
-                }}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  const sourceIndexStr = e.dataTransfer.getData('text/plain');
-                  const sourceIndex = parseInt(sourceIndexStr, 10);
-                  if (!isNaN(sourceIndex) && activeNote.blocks.length > 0) {
-                    handleReorderBlocks(sourceIndex, activeNote.blocks.length - 1, 'bottom');
-                  }
-                }}
-                onClick={() =>
-                  handleInsertBlockBelow('paragraph', activeNote.blocks.length - 1)
-                }
-                className="h-28 cursor-text border-2 border-transparent hover:border-dashed hover:border-neutral-200 dark:hover:border-neutral-800 rounded-xl transition-colors mt-2"
-                title="Clicca per aggiungere testo in fondo o rilascia per spostare alla fine"
-              />
-            </div>
-          </div>
-        ) : (
-          <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-neutral-400">
-            <div className="w-12 h-12 rounded-2xl bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center mb-4 text-neutral-500">
-              <FileText className="w-6 h-6" />
-            </div>
-            <h3 className="font-display text-base font-semibold text-neutral-800 dark:text-neutral-200 mb-1">
-              Nessuna nota in questo workspace
-            </h3>
-            <p className="text-xs max-w-sm mb-4">
-              Crea una nuova nota premendo <kbd className="px-1.5 py-0.5 rounded bg-neutral-200 dark:bg-neutral-700 font-mono text-[11px]">Ctrl+N</kbd> per iniziare a organizzare testi, to-do list, codice, foto e allegati.
-            </p>
-            <button
-              onClick={handleCreateNote}
-              className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-neutral-900 dark:bg-neutral-100 dark:text-neutral-900 rounded-lg shadow-sm hover:opacity-90 transition-opacity"
-            >
-              <Plus className="w-4 h-4" /> Crea la prima nota (Ctrl+N)
-            </button>
-          </div>
-        )}
+        {/* Editor Footer pinned at bottom */}
+        <EditorFooter
+          note={activeNote}
+          syncStatus={syncStatus}
+          isLoggedIn={!!currentUser}
+          isSidebarOpen={isSidebarOpen}
+          defaultContentWidth={activeWsDefaultContentWidth}
+          onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
+          onUpdateNote={handleUpdateNote}
+          onDeleteNote={handleDeleteNote}
+          onSetDefaultContentWidth={handleSetWorkspaceDefaultContentWidth}
+        />
       </main>
 
       {/* Global Search Modal (Ctrl/Cmd + Shift + K or Alt+Enter from search) */}
